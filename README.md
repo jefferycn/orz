@@ -8,13 +8,14 @@ When you have your own Jellyfin server, you may have a lot of media files and su
 ## How it works?
 
 - `orz` listens the directory you specified.
-- Create a folder with the series name, for example `Tsukigakirei (2017)`.
+- Create a folder with the series name, for example `Tsukigakirei (2017)`. This naming convention is important, `orz` will use it to search the metadata from TMDB, and validate the first air year.
 - `orz` tries grab the metadata from TMDB and save `tvshow.nfo` to the folder and generates seasons folder.
 - When media files and subtitle files were moved or created under the session folder, `orz` will rename them based on the metadata.
 
 ## How to use?
 
 `TMDB_API_KEY` is required. You can get it from [TMDB](https://www.themoviedb.org/documentation/api).
+`TMDB_LANGUAGE` is optional. Default is `zh-CN`.
 `/media` folder is monitored by `orz`, mount your media folder under `/media`.
 
 You can either build from source or use pre-built docker image.
@@ -36,4 +37,11 @@ docker run -d --name orz \
     -v /path/to/tv-series:/media/tv-series \
     -e TMDB_API_KEY=your_api_key \
     orz
+```
+
+Command line tool:
+```shell
+orz
+orz create /path/to/your/show (2025)
+orz folder /path/to/your/folder
 ```

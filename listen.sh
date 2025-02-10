@@ -11,22 +11,33 @@ LOCK_FILE="/tmp/orz_lock"
 
 touch "$EVENT_FILE"
 monitor_folders() {
-inotifywait -m -r -e create,move --format '%w|%f|%e' "$WATCH_DIR" | while IFS="|" read -r fullpath file action; do
-    case "$action" in
-        CREATE,ISDIR)
-            echo "Folder '${fullpath}${file}' was created. Running orz create."
-            orz create "${fullpath}${file}"
-            ;;
-        CREATE|MOVED_TO)
-            echo "$fullpath" >> "$EVENT_FILE"
-            ;;
-          MOVED_FROM)
+    inotifywait -m -r -e create,move --format '%w|%f|%e' "$WATCH_DIR" | while IFS="|" read -r fullpath file action; do
+        case "$action" in
+            CREATE,ISDIR)
+                echo "Folder '${fullpath}${file}' was created. Running orz create."
+                orz create "${fullpath}${file}"
+                ;;
+            CREATE|MOVED_TO)
+                add_folder "${fullpath}" "${file}"
+                ;;
+              MOVED_FROM)
+                ;;
+            *)
+                echo "Unhandled action: $action on file '$fullpath'"
+                ;;
+        esac
+    done
+}
+
+add_folder() {
+    extension="${2##*.}"
+    case "$extension" in
+        mkv|mp4|ass|srt)
+            echo "$1" >> "$EVENT_FILE"
             ;;
         *)
-            echo "Unhandled action: $action on file '$fullpath'"
             ;;
     esac
-done
 }
 
 process_folders() {
