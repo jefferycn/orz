@@ -1,0 +1,15 @@
+{
+    "require": {
+        "php-tmdb/api": "^4",
+        "symfony/event-dispatcher": "^7.2",
+        "guzzlehttp/guzzle": "^7.9",
+        "symfony/cache": "^7.2",
+        "php-http/cache-plugin": "^2.0",
+        "nyholm/psr7": "^1.8"
+    },
+    "config": {
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
+    }
+}
