@@ -209,46 +209,43 @@ function renameMediaFiles($path, $showName, $episodes)
         }
     }
 
-    $totalFiles = count($fileGroups);
     foreach ($fileGroups as $baseName => $fileSet) {
-        $numericPart = "0";
-        if ($totalFiles < 3) {
-            if (preg_match('/\b(\d{1,3})\b/', clearSeasonSegment($baseName), $matches)) {
-                $numericPart = intval($matches[1]);
-            }
-        } else {
-            $tokens = $tokenizedFilenames[$baseName] ?? [];
-            $uniqueParts = array_filter($tokens, function ($token) use ($segmentCounts, $fileSet) {
-                return $segmentCounts[$token] <= count($fileSet);
-            });
-            foreach ($uniqueParts as $token) {
-                if (preg_match('/\d{1,3}/', clearSeasonSegment($token), $matches)) {
-                    $numericPart = ltrim($matches[0], "0Ee");
-                    $numericPart = $numericPart === "" ? 0 : intval($numericPart);
-                    break;
-                }
+        $numericPart = "";
+        if (preg_match('/\b(\d{1,3})\b/', clearSeasonSegment($baseName), $matches)) {
+            $numericPart = intval($matches[1]);
+        }
+        $tokens = $tokenizedFilenames[$baseName] ?? [];
+        $uniqueParts = array_filter($tokens, function ($token) use ($segmentCounts, $fileSet) {
+            return $segmentCounts[$token] <= count($fileSet);
+        });
+        foreach ($uniqueParts as $token) {
+            if (preg_match('/\d{1,3}/', clearSeasonSegment($token), $matches)) {
+                $numericPart = ltrim($matches[0], "0Ee");
+                $numericPart = $numericPart === "" ? 0 : intval($numericPart);
+                break;
             }
         }
 
         foreach ($fileSet as $file) {
             $originalFile = $file["filename"];
             $extension = $file["extension"];
-            $newFilename = $episodes[$numericPart] ?? $numericPart;
-            if (in_array($extension, ['ass', 'srt'])) {
-                if (preg_match('/\.(chs|cht|zh|en|jp|jpn|eng|other)\./', $originalFile, $matches)) {
-                    $newFilename .= $matches[0] . $extension;
+            if ($newFilename = $episodes[$numericPart]) {
+                if (in_array($extension, ['ass', 'srt'])) {
+                    if (preg_match('/\.(chs|cht|zh|en|jp|jpn|eng|other)\./', $originalFile, $matches)) {
+                        $newFilename .= $matches[0] . $extension;
+                    } else {
+                        $newFilename .= '.' . $extension;
+                    }
                 } else {
                     $newFilename .= '.' . $extension;
                 }
-            } else {
-                $newFilename .= '.' . $extension;
+                $newFilename = cleanPath(strip_tags($newFilename));
+                $newFilename = str_replace('/', ' ', $newFilename);
+                if (strcasecmp($originalFile, $newFilename) === 0) {
+                    continue;
+                }
+                safeRename($path . '/' . $originalFile, $path . '/' . $newFilename);
             }
-            $newFilename = cleanPath(strip_tags($newFilename));
-            $newFilename = str_replace('/', ' ', $newFilename);
-            if (strcasecmp($originalFile, $newFilename) === 0) {
-                continue;
-            }
-            safeRename($path . '/' . $originalFile, $path . '/' . $newFilename);
         }
     }
 }
