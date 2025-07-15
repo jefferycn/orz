@@ -253,7 +253,11 @@ function renameMediaFiles($path, $showName, $episodes)
 function getNameWithoutExtension($filename)
 {
     $nameWithoutExtension = pathinfo($filename, PATHINFO_FILENAME);
-    return pathinfo($nameWithoutExtension, PATHINFO_FILENAME);
+    $secondExtension = pathinfo($nameWithoutExtension, PATHINFO_EXTENSION);
+    if(strlen($secondExtension) > 1 && strlen($secondExtension) <= 5 && ctype_alpha($secondExtension)) {
+        return pathinfo($nameWithoutExtension, PATHINFO_FILENAME);
+    }
+    return $nameWithoutExtension;
 }
 
 function clearSeasonSegment($baseName): string
