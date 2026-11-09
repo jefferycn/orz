@@ -34,7 +34,7 @@ from .nfo import find_season_dir
 from .parser import (
     MEDIA_EXTS, SUBTITLE_EXTS, VIDEO_EXTS, base_name, batch_parse,
     is_already_named, lang_suffix, looks_like_non_episode,
-    organized_episode, parse_episode, season_number_from_folder,
+    parse_episode, season_number_from_folder,
 )
 
 log = logging.getLogger("orz.renamer")
@@ -108,19 +108,37 @@ def group_files(season_dir: str) -> dict[str, list[str]]:
 
 
 def existing_episodes(season_dir: str) -> set[int]:
-    """Episode numbers already present as organised files in this folder.
+    """Episode numbers already held by *organised videos* in this folder.
 
-    Only files whose season marker matches this folder's season
-    count: a ``S02E01`` file sitting in ``Season 1`` is misplaced,
-    not an existing episode of Season 1 — counting it would make
-    the real ``S01E01`` collide with it.
+    Only files already in the clean ``Title - SxxEyy - ...`` form
+    count, and only videos: a scene-named file
+    (``Show.S01E01.1080p...``) does not hold its episode — it is
+    the file waiting to be renamed, and counting it would make it
+    collide with itself (v2.7.5: a whole season of scene-named
+    files would otherwise all pend "episode N already exists").
+    A subtitle never holds an episode either: several subtitles
+    share one episode, and a subtitle arriving after its video
+    must still be renamed to match it.  A misplaced ``S02E01``
+    file sitting in ``Season 1`` is not an existing episode of
+    Season 1 either — counting it would make the real ``S01E01``
+    collide with it.
     """
     season = season_number_from_folder(os.path.basename(season_dir))
     eps: set[int] = set()
     for name in os.listdir(season_dir):
-        parsed = organized_episode(name)
-        if parsed and (season is None or parsed[0] == season):
-            eps.add(parsed[1])
+        path = os.path.join(season_dir, name)
+        if not os.path.isfile(path):
+            continue
+        if name.rsplit(".", 1)[-1].lower() not in VIDEO_EXTS:
+            continue
+        if not is_already_named(name, season):
+            continue
+        guess = parse_episode(name)
+        if guess.confidence != "high" or guess.episode is None:
+            continue
+        ep_season = guess.season if guess.season is not None else season
+        if season is None or ep_season == season:
+            eps.add(guess.episode)
     return eps
 
 
@@ -216,12 +234,10 @@ def rename_season_folder(season_dir: str, show_title: str, show_dir: str,
 
     for base, files in group_files(season_dir).items():
         # Whole group already organised -> skip.  "Organised" means
-        # the filename already carries an explicit episode marker
-        # for this folder's season, in any format — orz's own
-        # ``Title - S01E05 - ...`` *or* the library's existing
-        # ``Dragon Ball - S02E15 - ...`` / ``Show S01E01.mkv`` /
-        # ``Show E01 ...``.  Only files without such a marker are
-        # orz's to normalise.
+        # the clean library form ``Title - S01E05 - ...`` (see
+        # ``is_already_named``): a scene release name
+        # (``Show.S01E01.1080p.WEB-DL...``) carries a marker but is
+        # a download name, and orz's job is to normalise it.
         if all(is_already_named(f, season) for f in files):
             result.skipped.extend(files)
             continue
@@ -237,14 +253,25 @@ def rename_season_folder(season_dir: str, show_title: str, show_dir: str,
             continue
         if any(is_already_named(f, season) for f in files):
             # Mixed group: organised files stay, the rest follow them.
-            ep = next(organized_episode(f)[1]
-                      for f in files if organized_episode(f))
+            ep = next(
+                parse_episode(f).episode
+                for f in files
+                if is_already_named(f, season)
+                and parse_episode(f).episode is not None)
             _rename_group(season_dir, show_title, files, season, ep,
                           mapper, result, dry_run, taken, known=known, show_dir=show_dir)
             continue
 
         video = next((f for f in files
                       if f.rsplit(".", 1)[-1].lower() in VIDEO_EXTS), files[0])
+        # Episode slots belong to videos: a subtitle never claims
+        # one and never blocks a video (or another subtitle) from
+        # it.  A subtitle-only group therefore skips the `taken`
+        # checks below — a subtitle arriving after its video must
+        # still be renamed to match it.  A real filename clash is
+        # still caught by _rename_group's target-exists check.
+        group_has_video = any(
+            f.rsplit(".", 1)[-1].lower() in VIDEO_EXTS for f in files)
         # The fingerprint (first 4 MiB of the video, hashed) is lazy:
         # it is only needed to look up a stored mapping from an
         # earlier scan, or to record a gap-fill guess.  A file whose
@@ -260,7 +287,8 @@ def rename_season_folder(season_dir: str, show_title: str, show_dir: str,
             if fingerprint in known:
                 ep = known[fingerprint]
                 mapped = mapper.map(season, ep)
-                if mapped and mapped[1] not in taken - {ep}:
+                if mapped and (not group_has_video
+                               or mapped[1] not in taken - {ep}):
                     _rename_group(season_dir, show_title, files, mapped[0],
                                   mapped[1], mapper, result, dry_run, taken,
                                   ep_title=mapped[2], known=known,
@@ -292,7 +320,7 @@ def rename_season_folder(season_dir: str, show_title: str, show_dir: str,
                               f"(season {guess.season or season})"})
                 continue
             target_season, target_ep, title = mapped
-            if target_ep in taken:
+            if group_has_video and target_ep in taken:
                 result.pending.append({
                     "file": video,
                     "reason": f"episode {target_ep} already exists "
@@ -378,7 +406,11 @@ def _rename_group(season_dir: str, show_title: str, files: list[str],
         result.renamed.append((filename, new))
         log.info("Renaming: %s -> %s%s", filename, new,
                  " (gap-fill)" if inferred else "")
-    taken.add(episode)
+    # Only a video claims its episode slot (see the `taken` note in
+    # rename_season_folder): a subtitle renamed here must not block
+    # the video of the same episode arriving later.
+    if any(f.rsplit(".", 1)[-1].lower() in VIDEO_EXTS for f in files):
+        taken.add(episode)
     if fingerprint is not None and known is not None and not dry_run:
         # Remember fingerprint -> episode so a re-scan reuses this
         # mapping instead of re-guessing (gap-fill stays stable).

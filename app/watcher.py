@@ -24,8 +24,8 @@ How it works
   however many restarts happen.  After every processed directory
   its new snapshot is recorded, so the next startup skips it.
   The first run after upgrading has no snapshots and processes
-  everything once (to build the baseline); files that already
-  carry an explicit episode marker are still left alone by the
+  everything once (to build the baseline); files already in the
+  clean ``Title - S01E05 - ...`` form are still left alone by the
   renamer, so that baseline pass renames nothing that was
   already organised.
 * A change event marks only the affected directory dirty; it is
@@ -303,6 +303,13 @@ def process_season_folder(season_dir: str, dry_run: bool = False,
     if not unorganised:
         result = RenameResult()
         result.skipped = [f for files in groups.values() for f in files]
+        if result.skipped:
+            # Say so at INFO, not just DEBUG: a folder full of
+            # already-organised files is the normal "nothing to do"
+            # case, and silence here once looked like a dead
+            # watcher (v2.7.5: 17 .ass files, no rename, no log).
+            log.info("Skipping %s: all %d file(s) already organised",
+                     season_dir, len(result.skipped))
         return result
     cached = load_episodes(show_dir)
     if cached is None or cached.get("tmdbid") != nfo["tmdbid"]:

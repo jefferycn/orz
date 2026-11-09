@@ -37,9 +37,23 @@ class TestAlreadyNamed(unittest.TestCase):
     def test_sxxeyy_matching_folder_is_organised(self):
         self.assertTrue(is_already_named(
             "Dragon Ball - S02E15 - The Final Blow HDTV-720p.mkv", 2))
-        self.assertTrue(is_already_named("Attack on Titan S01E01.mkv", 1))
         self.assertTrue(is_already_named(
             "罗梅莉亚战记 - S01E05 - 第5集.mkv", 1))
+
+    def test_scene_names_are_not_organised(self):
+        # v2.7 counted any SxxEyy marker as organised, so a whole
+        # season of scene release names was skipped silently (no
+        # rename, no log).  The marker must sit in the clean
+        # ``Title - SxxEyy`` form; dots and release tags mean the
+        # file still needs normalising.
+        self.assertFalse(is_already_named(
+            "Attack on Titan S01E01.mkv", 1))
+        self.assertFalse(is_already_named(
+            "Desperate.Housewives.S04E01.Now.You.Know.1080p.WEB-DL."
+            "x265.10bit.AAC.5.1-RCVR.ass", 4))
+        self.assertFalse(is_already_named(
+            "Desperate.Housewives.S04E11.Sunday.1080p.WEB-DL.x265."
+            "10bit.AAC.5.1-RCVR[UTR].ass", 4))
 
     def test_sxxeyy_wrong_folder_is_not(self):
         self.assertFalse(is_already_named(
@@ -47,8 +61,11 @@ class TestAlreadyNamed(unittest.TestCase):
         self.assertFalse(is_already_named("Show - S01E05 - Title.mkv", 2))
 
     def test_eyy_alone_counts(self):
-        # The user's library files: "A Sister's All You Need. E01 ..."
-        self.assertTrue(is_already_named(
+        # Only in the clean ``Title - E01`` form: the user's
+        # ``A Sister's All You Need. E01 ...`` has no dash before
+        # the marker, so it is a download name and gets renamed.
+        self.assertTrue(is_already_named("Show - E01.mkv", 1))
+        self.assertFalse(is_already_named(
             "A Sister's All You Need. E01 [A Sister is All You Need].mp4", 1))
 
     def test_fansub_names_still_need_renaming(self):

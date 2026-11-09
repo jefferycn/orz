@@ -27,7 +27,7 @@ docker compose up -d --build
 
 启动时先加 watch 再扫一遍补漏：容器停机期间移入的文件，只要大小已稳定，第一次扫描就处理；启动后才到的文件会触发事件，不会漏。**补扫只处理自上次记录以来有改动的目录**：每个季文件夹的快照（修改时间 + 文件列表）存在本剧 `.orz/snapshots.json` 里，没改动的目录启动时直接跳过，不打开、不刷新、不改名——只有季文件夹改名标准化（`Season 1` → `Season 01`）是每次扫描都跑的，它只看文件夹名、不读文件。安全网默认是关的（全量复扫 `ORZ_RESCAN_INTERVAL=0`），只在 inotify 队列溢出时复扫一次；想开每小时复扫就设 `ORZ_RESCAN_INTERVAL=3600`。inotify 不可用时自动回落到轮询（`ORZ_WATCH_MODE=poll`）。
 
-已经按 `SxxEyy` / `Eyy` / `第x集` 命名的文件一律不动，不管它原来是什么语言、什么格式：`Dragon Ball - S02E15 - ...` 放在 `Season 2` 里、`Attack on Titan S01E01.mkv`、`A Sister's All You Need. E01 ...` 都算已经整理好，orz 不会再去“纠正”它。只有文件名里没有明确集数标记的文件才是 orz 要改的（比如 `[Group] Show - 05.mkv`）。季标记和文件夹季号不一致的文件仍会处理（比如 `Season 2 - 05` 放在 `Season 01` 里）。
+已经是干净的 `剧名 - SxxEyy - 集名` 形式的文件一律不动：`Dragon Ball - S02E15 - ...` 放在 `Season 2` 里、orz 自己改过的 `绝望主妇 - S04E01 - ...`，都算已经整理好。只带集数标记但不是这个形式的，仍要改名：`Attack on Titan S01E01.mkv`、`A Sister's All You Need. E01 ...`、以及发布组文件名 `Desperate.Housewives.S04E01.1080p.WEB-DL...ass`（点号分隔、带编码和发布组标签的是下载名，不是资料库名），都会改成中文格式。文件名里没有明确集数标记的文件也是要改的（比如 `[Group] Show - 05.mkv`）。季标记和文件夹季号不一致的文件仍会处理（比如 `Season 2 - 05` 放在 `Season 01` 里）。集号只属于视频：字幕不占集号，后到的字幕即使视频已经改好名了也会跟着改；同集的两个视频才算冲突。
 
 ## 命令行只是测试和排错用
 

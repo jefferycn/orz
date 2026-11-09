@@ -448,21 +448,58 @@ def looks_like_non_episode(filename: str) -> bool:
     return any(s in lowered for s in _NON_EPISODE_SUBSTRINGS)
 
 
-def is_already_named(filename: str, folder_season: int | None) -> bool:
-    """Already carries an explicit episode marker for this folder?
+def _clean_marker_re(guess) -> re.Pattern | None:
+    """Regex for `` - <this episode's marker>`` at the end of a stem.
 
-    Any format counts, not just orz's own ``Title - S01E05 - ...``:
-    ``Dragon Ball - S02E15 - ...`` in ``Season 2``,
-    ``Attack on Titan S01E01.mkv`` in ``Season 01`` and
-    ``A Sister's All You Need. E01 ...`` in ``Season 1`` are all
-    already organised — leave them alone.  Only the Western
-    markers count (``SxxEyy`` / ``NxNN`` / ``Season x Episode y`` /
-    ``Eyy`` / ``第x季第y集``): a bare number (``[Group] Show -
-    05.mkv``), a bracket ``[01]`` and a plain ``第x集`` / ``第x話``
-    are fansub naming that orz is meant to normalise (ReLIFE
-    ``第14話`` still gets renamed to ``S01E14``).  A marker for a
-    *different* season (``Season 2 - 05`` sitting in ``Season 01``)
-    is not "already named" — that file still needs to move.
+    ``S04E01`` -> `` - S0*4E0*1(?: - .*)?$``; the ``0*`` allows any
+    zero padding (``S4E1`` / ``S04E01``).  Only the marker the parser
+    actually found counts — a different number elsewhere in the name
+    does not make the file organised.
+    """
+    s, e = guess.season, guess.episode
+    if guess.reason == "SxxEyy":
+        if s is None:
+            return None
+        return re.compile(rf" - S0*{s}E0*{e}(?: - .*)?$", re.IGNORECASE)
+    if guess.reason == "NxNN":
+        if s is None:
+            return None
+        return re.compile(rf" - 0*{s}[xX]0*{e}(?: - .*)?$")
+    if guess.reason == "Eyy":
+        return re.compile(rf" - E0*{e}(?: - .*)?$", re.IGNORECASE)
+    if guess.reason == "Season x Episode y":
+        if s is None:
+            return None
+        return re.compile(rf" - Season 0*{s} Episode 0*{e}(?: - .*)?$",
+                          re.IGNORECASE)
+    if guess.reason == "第x季第y集":
+        if s is None:
+            return None
+        return re.compile(rf" - 第0*{s}季第0*{e}集(?: - .*)?$")
+    return None
+
+
+def is_already_named(filename: str, folder_season: int | None) -> bool:
+    """Already in the clean ``Title - S01E05 - ...`` library form?
+
+    v2.7 counted *any* explicit marker as organised — which also
+    skipped scene release names (``Show.S04E01.1080p.WEB-DL...``):
+    they carry an SxxEyy marker, but they are download names, not
+    library names, and orz's job is to normalise exactly those
+    (v2.7.5: a whole season of .ass files moved in, and nothing
+    happened at all — no rename, no log).  So the marker must sit
+    in clean form: `` - SxxEyy`` (or `` - NxNN`` / `` - Eyy`` /
+    `` - Season x Episode y`` / `` - 第x季第y集``), followed by the
+    end of the name or `` - <episode title>``.  ``Dragon Ball -
+    S02E15 - ...`` and orz's own ``Title - S01E05 - ...`` count;
+    ``Attack on Titan S01E01`` (no dash before the marker) and
+    ``Desperate.Housewives.S04E01.1080p...`` (dots, release tags)
+    do not — they get renamed to the Chinese form.  Only the
+    Western markers count: a bare number, a bracket ``[01]`` and a
+    plain ``第x集`` / ``第x話`` are fansub naming that orz is meant
+    to normalise (ReLIFE ``第14話`` still gets renamed to
+    ``S01E14``).  A marker for a *different* season is not
+    "already named" either.
     """
     guess = parse_episode(filename)
     if guess.confidence != "high" or guess.episode is None:
@@ -470,9 +507,14 @@ def is_already_named(filename: str, folder_season: int | None) -> bool:
     if guess.reason not in {"SxxEyy", "NxNN", "Season x Episode y",
                             "Eyy", "第x季第y集"}:
         return False
-    if guess.season is None:
-        return True  # Eyy: season is the folder's season.
-    return folder_season is None or guess.season == folder_season
+    if guess.season is not None and folder_season is not None \
+            and guess.season != folder_season:
+        return False
+    # Eyy: season is the folder's season.
+    marker_re = _clean_marker_re(guess)
+    if marker_re is None:
+        return False
+    return marker_re.search(strip_lang_suffix(filename)) is not None
 
 
 def organized_episode(filename: str) -> tuple[int, int] | None:
