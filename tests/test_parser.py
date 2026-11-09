@@ -6,7 +6,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.parser import (
-    base_name, is_organized, lang_suffix, organized_episode,
+    base_name, batch_parse, is_organized, lang_suffix, organized_episode,
     parse_episode, parse_folder_name, season_number_from_folder,
 )
 
@@ -116,6 +116,53 @@ class TestParser(unittest.TestCase):
     def test_ambiguous_numbers_not_guessed(self):
         g = parse_episode("Show 03 04.mkv", "Show")
         self.assertIsNone(g.episode)
+
+
+class TestBatchParse(unittest.TestCase):
+    def test_giji_harem_common_text(self):
+        files = [
+            "[Moozzi2] Giji Harem - 01 (BD 1920x1080 x265-10Bit Flac).mkv",
+            "[Moozzi2] Giji Harem - 02 (BD 1920x1080 x265-10Bit Flac).mkv",
+            "[Moozzi2] Giji Harem - 12 END (BD 1920x1080 x265-10Bit Flac).mkv",
+        ]
+        out = batch_parse(files)
+        self.assertEqual([out[f].episode for f in files], [1, 2, 12])
+
+    def test_medalist_and_ao_no_hako(self):
+        out = batch_parse([
+            "[DBD-Raws][Medalist][01][1080P][BDRip][HEVC-10bit][FLAC].mkv",
+            "[DBD-Raws][Medalist][05][1080P][BDRip][HEVC-10bit][FLAC].mkv",
+        ])
+        self.assertEqual(sorted(g.episode for g in out.values()), [1, 5])
+        # 季在公共前缀里（Season 2），剥之前要先读出来。
+        out = batch_parse([
+            "[Tsukigakirei] Ao no Hako Season 2 - 04 [WebRip 1080P].mp4",
+            "[Tsukigakirei] Ao no Hako Season 2 - 05 [WebRip 1080P].mp4",
+        ])
+        self.assertEqual([(g.episode, g.season) for g in out.values()],
+                         [(4, 2), (5, 2)])
+
+    def test_shared_number_stripped(self):
+        # "Vol.3" 是整批共有的，单文件解析会把它当成第二个集数
+        # 候选（ambiguous ['3', '01']），batch 剥掉后只剩 01。
+        out = batch_parse([
+            "[Group] Show Vol.3 - 01.mkv",
+            "[Group] Show Vol.3 - 02.mkv",
+        ])
+        self.assertEqual([out[f].episode for f in
+                          ["[Group] Show Vol.3 - 01.mkv",
+                           "[Group] Show Vol.3 - 02.mkv"]], [1, 2])
+
+    def test_single_file_no_batch(self):
+        # 单文件没有“公共”可言，回落到逐文件解析。
+        self.assertEqual(batch_parse(["Show - 01.mkv"]), {})
+        self.assertEqual(batch_parse([]), {})
+
+    def test_token_level_not_character_level(self):
+        # 01 / 02 公共字符是 "0"，按字符剥会切坏集数；
+        # 按 token 剥，01 和 02 是不同 token，公共前缀停在它们之前。
+        out = batch_parse(["Show - 01.mkv", "Show - 02.mkv"])
+        self.assertEqual(sorted(g.episode for g in out.values()), [1, 2])
 
 
 class TestOrganized(unittest.TestCase):

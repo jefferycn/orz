@@ -266,6 +266,24 @@ class TestFansubBatches(unittest.TestCase):
             "青春猪头少年不会梦到兔女郎学姐 - S01E01 - Ep1.tc_v2.ass",
             [n for _, n in r.renamed])
 
+    def test_batch_common_text_rescues_shared_number(self):
+        # "Vol.3" 整批共有：单文件解析 ambiguous ['3', '01']，
+        # 只能 gap-fill；batch 剥掉共有文字后直接认出 01 / 02。
+        # 单文件时没有 batch，仍走 gap-fill（对照）。
+        titles = {i: f"第{i}集" for i in range(1, 13)}
+        files = {"[Group] Show Vol.3 - 01.mkv": b"a",
+                 "[Group] Show Vol.3 - 02.mkv": b"b"}
+        r, _ = self._run_show("Show", "Show (2024)", {1: titles}, files)
+        self.assertEqual(r.pending, [])
+        self.assertEqual(sorted(n for _, n in r.renamed), [
+            "Show - S01E01 - 第1集.mkv", "Show - S01E02 - 第2集.mkv"])
+        r2, _ = self._run_show("Show", "Show (2024)", {1: titles},
+                               {"[Group] Show Vol.3 - 02.mkv": b"b"})
+        # 单文件：batch 不起作用，gap-fill 补 1（不是 2）——
+        # 这是已知局限，不是 bug：没有第二文件就没法知道 3 是共有的。
+        self.assertEqual([n for _, n in r2.renamed],
+                         ["Show - S01E01 - 第1集.mkv"])
+
 
 if __name__ == "__main__":
     unittest.main()

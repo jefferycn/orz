@@ -31,8 +31,9 @@ import re
 
 from .mapper import EpisodeMapper, load_override
 from .parser import (
-    MEDIA_EXTS, SUBTITLE_EXTS, VIDEO_EXTS, base_name, is_organized,
-    lang_suffix, organized_episode, parse_episode, season_number_from_folder,
+    MEDIA_EXTS, SUBTITLE_EXTS, VIDEO_EXTS, base_name, batch_parse,
+    is_organized, lang_suffix, organized_episode, parse_episode,
+    season_number_from_folder,
 )
 
 log = logging.getLogger("orz.renamer")
@@ -185,6 +186,26 @@ def rename_season_folder(season_dir: str, show_title: str, show_dir: str,
     # Episodes already claimed by stored mappings count as taken too.
     taken = set(existing) | set(known.values())
 
+    # Batch common-text guesses: files dropped in together share the
+    # release group / show title / codec — strip what is common to
+    # the whole batch (token-level) and what is left per file is
+    # (almost) only the episode number.  Computed once per scan over
+    # the representative (video) file of each unorganised group.
+    _groups = group_files(season_dir)
+    _reps = []
+    _rep_of_group: dict[str, str] = {}
+    for base, files in _groups.items():
+        if all(is_organized(f, show_title) for f in files):
+            continue
+        rep = next((f for f in files
+                    if f.rsplit(".", 1)[-1].lower() in VIDEO_EXTS), files[0])
+        _reps.append(rep)
+        _rep_of_group[base] = rep
+    _batch = batch_parse(_reps)
+    if _batch:
+        log.info("Batch common-text parse: %d file(s) guessed from "
+                 "shared text", len(_batch))
+
     for base, files in group_files(season_dir).items():
         # Whole group already organised -> skip.
         if all(is_organized(f, show_title) for f in files):
@@ -225,8 +246,18 @@ def rename_season_folder(season_dir: str, show_title: str, show_dir: str,
                                    "reason": "stored episode no longer maps"})
             continue
 
-        # 2. Parse the filename.
+        # 2. Parse the filename.  An explicit SxxEyy / Eyy / 第x集
+        # wins; otherwise a batch common-text guess wins over the
+        # per-file bare-number guess — the shared text (release
+        # group, show title, "Vol.3", codec) has already been
+        # stripped, so a number that is common to the whole batch
+        # cannot look like a second episode candidate.
         guess = parse_episode(video, show_title)
+        batch_guess = _batch.get(_rep_of_group.get(base, ""))
+        if guess.confidence != "high" and batch_guess is not None:
+            guess = batch_guess
+            log.info("Batch parse %s -> episode %s (season %s)",
+                     video, guess.episode, guess.season)
         if guess.episode is not None:
             mapped = mapper.map(guess.season if guess.season is not None
                                 else season, guess.episode)

@@ -297,6 +297,95 @@ def parse_episode(filename: str, show_title: str | None = None) -> EpisodeGuess:
     )
 
 
+def _tokens(name: str) -> list[str]:
+    """Filename stem split into tokens (space / ``-`` / ``_`` / ``.`` /
+    brackets / parens are separators).  Token-level, never
+    character-level: ``01`` / ``02`` share the character ``0``,
+    but they are different tokens."""
+    stem = strip_lang_suffix(name)
+    return [t for t in re.split(r"[\s\-_\.\[\]\(\)]+", stem) if t]
+
+
+def _season_from_tokens(tokens: list[str]) -> int | None:
+    """Season number inside a token list, e.g. ``Season 2`` / ``S2`` /
+    ``第2季`` / ``第二季``.  Used for a season that lives in the
+    common prefix (``Ao no Hako Season 2 - 05``) and would be lost
+    when that prefix is stripped."""
+    joined = " ".join(tokens)
+    m = re.search(r"(?i)\bseason\s*(\d{1,2})\b", joined)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(?i)\bS(\d{1,2})\b", joined)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"第\s*(\d{1,2})\s*季", joined)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"第([一二三四五六七八九十])季", joined)
+    if m:
+        return "一二三四五六七八九十".index(m.group(1)) + 1
+    return None
+
+
+def batch_parse(filenames: list[str]) -> dict[str, EpisodeGuess]:
+    """Guess episodes from the text *common* to a batch of filenames.
+
+    The user's original idea: files dropped in together share the
+    release group, show title, codec, year, etc. — strip what is
+    common to all of them (token-level common prefix + suffix) and
+    what is left per file is (almost) only the episode number.
+    E.g. ``[Moozzi2] Giji Harem - 01 (BD 1920x1080 ...)`` /
+    ``... - 02 ...`` -> rest ``01`` / ``02``; ``Show Vol.3 - 01`` /
+    ``Show Vol.3 - 02`` -> the shared ``Vol.3`` is stripped, so the
+    ``3`` no longer looks like a second episode candidate.
+
+    Returns ``{filename: EpisodeGuess}`` for files it could guess.
+    Fewer than 2 files -> ``{}`` (no "common" exists for one file;
+    the caller falls back to ``parse_episode``).  A file whose
+    remainder has no trustworthy number is simply absent — also a
+    fallback to ``parse_episode``, never a 01 guess.
+    """
+    if len(filenames) < 2:
+        return {}
+    token_lists = [_tokens(f) for f in filenames]
+    pre = 0
+    for tup in zip(*token_lists):
+        if len({t.lower() for t in tup}) == 1:
+            pre += 1
+        else:
+            break
+    if pre == 0:
+        return {}
+    suf = 0
+    for tup in zip(*[reversed(t) for t in token_lists]):
+        if len({t.lower() for t in tup}) == 1:
+            suf += 1
+        else:
+            break
+    min_len = min(len(t) for t in token_lists)
+    # Prefix + suffix must not eat the whole name.
+    if pre + suf >= min_len:
+        suf = max(0, min_len - pre - 1)
+    out: dict[str, EpisodeGuess] = {}
+    for filename, toks in zip(filenames, token_lists):
+        rest = toks[pre:len(toks) - suf if suf else None]
+        if not rest:
+            continue
+        season = _season_from_tokens(toks[:pre])
+        guess = parse_episode(" ".join(rest), None)
+        if guess.episode is None:
+            continue
+        if season is not None and guess.season is None:
+            guess = EpisodeGuess(guess.episode, season, guess.confidence,
+                                 "common text")
+        else:
+            guess = EpisodeGuess(guess.episode, guess.season or season,
+                                 guess.confidence,
+                                 f"common text: {guess.reason}")
+        out[filename] = guess
+    return out
+
+
 def season_number_from_folder(folder_name: str) -> int | None:
     """``Season 01`` -> 1, ``Specials`` -> 0, else None."""
     name = folder_name.strip()
