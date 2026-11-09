@@ -1,46 +1,63 @@
-"""Polling watcher — the main function of orz (replaces ``listen.sh``).
+"""Event-driven watcher — the main function of orz (replaces ``listen.sh``).
 
 The container's default command is ``watch``; the CLI commands
 (``create`` / ``folder`` / ``scan`` / ``dry-run`` / ``refresh``) exist
 only for manual testing and troubleshooting.
 
-Why polling, not inotify: the old script needed inotify-tools, a temp
-event file, a flock lock and a sleep loop, and still raced with files
-mid-copy.  Polling needs no extra binary and behaves the same on
-Synology bind mounts, where inotify is unreliable.
+Why inotify, not polling: polling re-reads every directory every
+30 s whether anything changed or not.  inotify (``app/inotify.py``,
+ctypes on libc, no extra binary) only wakes the process when a
+file or directory actually changes — one event per change, and a
+whole batch dropped in together is processed together once the
+files are stable.  The old PHP ``listen.sh`` used ``inotifywait``
+for the same reason; this is the same kernel mechanism, called
+directly.  Polling (``Watcher``) is kept as a fallback when
+inotify is unavailable (``ORZ_WATCH_MODE=poll``).
 
-How one scan works
-------------------
-* New show folder (``Name (Year)`` without ``tvshow.nfo``) -> ``create``
-  (TMDB lookup, writes nfo + season folders + ``.orz/episodes.json``).
-  A folder is created only once its directory listing has been stable
-  across two scans, so a folder still being filled is not created early.
-* Season folder -> rename, **offline**: only the local ``tvshow.nfo``
-  and ``.orz/episodes.json`` are read; TMDB is never called here.
-  If the episode cache is missing, the files are left pending with a
-  clear reason ("run ``orz refresh <show>`` once") instead of quietly
-  calling TMDB — that keeps renames working with no network at all.
-* A file is renamed only when its size + mtime have been unchanged
-  for ``stable_seconds`` (default 5 s): a file still being copied or
-  moved onto the NAS is left pending and retried next scan.
-* The first scan after start is a catch-up scan: files whose mtime is
-  already older than ``stable_seconds`` count as stable immediately,
-  so anything missed while the container was down is processed at
-  once instead of waiting out another stability window.
+How it works
+------------
+* Startup: one catch-up scan (the polling ``scan_once``), so
+  anything that arrived while the container was down is processed
+  at once; then inotify watches are added recursively to the roots,
+  show folders and season folders.
+* A change event marks only the affected directory dirty; it is
+  processed ``stable_seconds`` (default 5 s) after the *last*
+  event in it, so a slow copy keeps pushing its deadline back and
+  is never renamed mid-copy.  A moved-in file is already complete
+  and is processed after the same short wait.
+* New show folder (``Name (Year)`` without ``tvshow.nfo``) ->
+  ``create`` (TMDB lookup, writes nfo + season folders +
+  ``.orz/episodes.json``).
+* Season folder -> rename, **offline**: only the local
+  ``tvshow.nfo`` and ``.orz/episodes.json`` are read; TMDB is
+  never called here.  If the episode cache is missing, the files
+  are left pending with a clear reason ("run ``orz refresh
+  <show>`` once") instead of quietly calling TMDB.
+* Safety net: a full rescan every ``rescan_interval`` (default
+  1 h, ``ORZ_RESCAN_INTERVAL=0`` disables it) and on inotify
+  queue overflow, in case an event was ever missed.  The rescan
+  is the only periodic directory read; normal operation reads
+  nothing until an event arrives.
 
-De-duplication: the scan is single-threaded, a directory is only
-re-processed when its snapshot changed, already-renamed files are
-skipped by name, and the renamer's ``.orz/state.json`` remembers
-fingerprint -> episode, so a second scan never re-guesses or
-re-renames the same file.
+De-duplication: processing is single-threaded, already-renamed
+files are skipped by name, and the renamer's ``.orz/state.json``
+remembers fingerprint -> episode, so a second pass never
+re-guesses or re-renames the same file.
 """
 from __future__ import annotations
 
 import logging
 import os
+import select
+import threading
 import time
 
 from .cache import load_episodes, save_episodes
+from .inotify import (
+    IN_CLOSE_WRITE, IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_IGNORED,
+    IN_ISDIR, IN_MODIFY, IN_MOVED_FROM, IN_MOVED_TO, IN_MOVE_SELF,
+    IN_Q_OVERFLOW, Inotify,
+)
 from .mapper import EpisodeMapper, load_override
 from .nfo import generate_nfo, generate_season_folders, read_nfo
 from .parser import parse_folder_name, season_number_from_folder
@@ -50,8 +67,9 @@ from .tmdb import TmdbClient
 log = logging.getLogger("orz.watcher")
 
 DEFAULT_ROOTS = ["/media/anime", "/media/tv-series"]
-DEFAULT_INTERVAL = 30        # seconds between scans
+DEFAULT_INTERVAL = 30        # seconds between scans (polling fallback)
 DEFAULT_STABLE_SECONDS = 5   # file size/mtime unchanged for this long
+DEFAULT_RESCAN_INTERVAL = 3600  # safety-net full rescan, seconds (0 = off)
 
 
 def _snapshot(path: str) -> tuple | None:
@@ -271,6 +289,222 @@ class Watcher:
 
 # -- backwards-compatible module functions (used by the CLI) -----------
 
+class EventWatcher:
+    """Event-driven watcher: inotify + debounce, polling only as safety net.
+
+    ``client`` is only used to create a new show (TMDB lookup); pass
+    None when the watched tree already has ``tvshow.nfo`` files and
+    renames are all that is needed (tests do this).
+    """
+
+    def __init__(self, client: TmdbClient | None = None,
+                 roots: list[str] | None = None,
+                 stable_seconds: float = DEFAULT_STABLE_SECONDS,
+                 rescan_interval: float = DEFAULT_RESCAN_INTERVAL,
+                 dry_run: bool = False):
+        self.client = client
+        self.roots = roots or DEFAULT_ROOTS
+        self.stable_seconds = stable_seconds
+        self.rescan_interval = rescan_interval
+        self.dry_run = dry_run
+        self._stop = threading.Event()
+        self._inotify = Inotify()  # raises OSError when unavailable
+        self._wd_to_path: dict[int, str] = {}
+        self._path_to_wd: dict[str, int] = {}
+        # path -> monotonic time when it may be processed
+        self._dirty: dict[str, float] = {}
+        self._next_rescan = (time.monotonic() + rescan_interval
+                             if rescan_interval > 0 else None)
+        # Reuse the polling Watcher for catch-up / rescan scans and
+        # for per-file stability checks.
+        self._poller = Watcher(client, roots, stable_seconds=stable_seconds,
+                               dry_run=dry_run)
+
+    # -- watches --------------------------------------------------------
+    def _add_watch(self, path: str) -> None:
+        if path in self._path_to_wd or not os.path.isdir(path):
+            return
+        try:
+            wd = self._inotify.add_watch(path)
+        except OSError as e:
+            log.warning("Cannot watch %s: %s", path, e)
+            return
+        self._wd_to_path[wd] = path
+        self._path_to_wd[path] = wd
+
+    def _add_watch_recursive(self, path: str) -> None:
+        for dirpath, dirnames, _filenames in os.walk(path):
+            # .orz holds state.json, written by the renamer itself;
+            # watching it would only re-trigger on our own writes.
+            dirnames[:] = [d for d in dirnames if d != ".orz"]
+            self._add_watch(dirpath)
+
+    def _remove_watch(self, path: str) -> None:
+        wd = self._path_to_wd.pop(path, None)
+        if wd is not None:
+            self._wd_to_path.pop(wd, None)
+            try:
+                self._inotify.rm_watch(wd)
+            except OSError:
+                pass
+
+    def _mark_dirty(self, path: str) -> None:
+        self._dirty[path] = time.monotonic() + self.stable_seconds
+
+    # -- events ---------------------------------------------------------
+    def _handle_event(self, wd: int, mask: int, name: str) -> None:
+        path = self._wd_to_path.get(wd)
+        if path is None:
+            return
+        if mask & IN_Q_OVERFLOW:
+            log.warning("inotify queue overflow, doing a full rescan")
+            self._rescan()
+            return
+        if mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF):
+            self._remove_watch(path)
+            if os.path.isdir(path):
+                self._add_watch_recursive(path)
+                self._mark_dirty(path)
+            return
+        full = os.path.join(path, name) if name else path
+        if mask & IN_ISDIR:
+            if mask & (IN_CREATE | IN_MOVED_TO):
+                # A whole show folder (with Season 01 inside) moved
+                # in at once: watch every directory in it, not just
+                # the top one.
+                self._add_watch_recursive(full)
+                self._mark_dirty(full)
+                self._mark_dirty(path)
+            elif mask & (IN_DELETE | IN_MOVED_FROM):
+                self._remove_watch(full)
+                self._mark_dirty(path)
+            return
+        # File event: only the directory containing it is processed,
+        # and only after it has been quiet for stable_seconds.
+        self._mark_dirty(path)
+
+    # -- processing -----------------------------------------------------
+    def _process_show_dir(self, show_dir: str) -> None:
+        if not os.path.isdir(show_dir):
+            return
+        nfo_path = os.path.join(show_dir, "tvshow.nfo")
+        if not os.path.exists(nfo_path):
+            if self.client is None:
+                log.info("No tvshow.nfo in %s and no TMDB client, "
+                         "skipping", show_dir)
+                return
+            create_show(show_dir, self.client, dry_run=self.dry_run)
+            return
+        for entry in sorted(os.listdir(show_dir)):
+            season_dir = os.path.join(show_dir, entry)
+            if (os.path.isdir(season_dir)
+                    and season_number_from_folder(entry) is not None):
+                self._process_season_dir(season_dir)
+
+    def _process_season_dir(self, season_dir: str) -> None:
+        if not os.path.isdir(season_dir):
+            return
+        stable = self._poller._stable_files_in(season_dir)
+        result = process_season_folder(
+            season_dir, dry_run=self.dry_run, stable_files=stable)
+        if result is not None and any(
+                "still copying" in p.get("reason", "")
+                for p in result.pending):
+            # A file in this folder is still being written: retry
+            # after another stability window, without waiting for
+            # a new event (there may not be one).
+            self._mark_dirty(season_dir)
+
+    def _process_dirty(self) -> None:
+        now = time.monotonic()
+        for path, due in list(self._dirty.items()):
+            if due > now:
+                continue
+            del self._dirty[path]
+            try:
+                if path in self.roots:
+                    self._rescan()
+                elif season_number_from_folder(
+                        os.path.basename(path.rstrip("/"))) is not None:
+                    self._process_season_dir(path)
+                elif os.path.dirname(path.rstrip("/")) in self.roots:
+                    self._process_show_dir(path)
+                elif os.path.isdir(path):
+                    self._add_watch_recursive(path)
+                    self._process_show_dir(path)
+            except Exception:
+                log.exception("Failed processing %s", path)
+
+    def _rescan(self) -> None:
+        """Full scan + re-sync watches (startup, overflow, safety net)."""
+        try:
+            self._poller.scan_once()
+        except Exception:
+            log.exception("Rescan failed")
+        for root in self.roots:
+            self._add_watch_recursive(root)
+        if self.rescan_interval > 0:
+            self._next_rescan = time.monotonic() + self.rescan_interval
+
+    # -- main loop ------------------------------------------------------
+    def start(self) -> None:
+        log.info("Watching %s (inotify, files stable after %ss, "
+                 "safety rescan every %ss)",
+                 ", ".join(self.roots), self.stable_seconds,
+                 self.rescan_interval or "off")
+        # Watches first, catch-up scan second: a file that arrives
+        # after the watches are on generates an event, and a file
+        # that was already there is picked up by the scan.  The
+        # other order leaves a window where a new file is seen by
+        # neither.
+        for root in self.roots:
+            self._add_watch_recursive(root)
+        self._rescan()  # startup catch-up scan
+
+    def run_once(self, timeout: float | None = None) -> None:
+        """Wait for events (at most ``timeout``), then process due dirs."""
+        now = time.monotonic()
+        waits = []
+        if self._dirty:
+            waits.append(max(0.0, min(self._dirty.values()) - now))
+        if self._next_rescan is not None:
+            waits.append(max(0.0, self._next_rescan - now))
+        wait = min(waits) if waits else 1.0
+        if timeout is not None:
+            wait = min(wait, timeout)
+        try:
+            readable, _, _ = select.select(
+                [self._inotify.fileno()], [], [], wait)
+        except (OSError, ValueError):
+            readable = []
+        if readable:
+            try:
+                for wd, mask, name in self._inotify.read_events():
+                    self._handle_event(wd, mask, name)
+            except OSError:
+                # stop() closes the fd while this thread is in
+                # select/read; that is a normal shutdown, not an error.
+                if not self._stop.is_set():
+                    log.exception("Failed reading inotify events")
+        self._process_dirty()
+        if (self._next_rescan is not None
+                and time.monotonic() >= self._next_rescan):
+            log.info("Safety rescan")
+            self._rescan()
+
+    def watch(self) -> None:
+        self.start()
+        while not self._stop.is_set():
+            try:
+                self.run_once()
+            except Exception:
+                log.exception("Event loop failed, continuing")
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._inotify.close()
+
+
 def scan_once(roots: list[str], client: TmdbClient,
               stable: dict[str, tuple] | None = None,
               dry_run: bool = False) -> dict[str, tuple]:
@@ -285,5 +519,21 @@ def scan_once(roots: list[str], client: TmdbClient,
 
 
 def watch(roots: list[str], client: TmdbClient, interval: int = 30,
-          dry_run: bool = False) -> None:
-    Watcher(client, roots, interval=interval, dry_run=dry_run).watch()
+          dry_run: bool = False, mode: str = "inotify",
+          rescan_interval: float = DEFAULT_RESCAN_INTERVAL) -> None:
+    """Default entry point for ``orz watch``.
+
+    inotify by default; ``mode="poll"`` (or an inotify failure at
+    startup) falls back to the polling Watcher.
+    """
+    if mode == "poll":
+        Watcher(client, roots, interval=interval,
+                dry_run=dry_run).watch()
+        return
+    try:
+        EventWatcher(client, roots, dry_run=dry_run,
+                     rescan_interval=rescan_interval).watch()
+    except OSError:
+        log.warning("inotify unavailable, falling back to polling")
+        Watcher(client, roots, interval=interval,
+                dry_run=dry_run).watch()

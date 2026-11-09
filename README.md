@@ -10,7 +10,7 @@ Jellyfin 剧集自动改名：监控 NAS 上的 TV series / Anime 目录，新�
 docker compose up -d
 ```
 
-它在后台每 30 秒轮询 `/media/TV show` 和 `/media/Anime`：
+它在后台用 inotify 监控 `/media/TV show` 和 `/media/Anime`（事件驱动，不轮询）：文件或文件夹一有改动才处理，没改动时不读目录。inotify 是直接调 libc（标准库 ctypes），不用装 `inotify-tools`，也不用新依赖。
 
 1. 新建文件夹 `绝望主妇 (2004)`、`罗梅莉亚战记 (2026)` → 查 TMDB，写 `tvshow.nfo`、建 `Season 01` / `Specials`、并把集列表缓存到 `.orz/episodes.json`。
 2. 视频 / 字幕文件移入季文件夹 → 等文件大小稳定几秒（复制未完成不改名），按 `剧名 - S01E01 - 集名.mkv` 改名，字幕保留 `.zh.srt` / `.en.ass` / `.sc_v2.ass` / `.tc_v2.ass` 等语言后缀（sc 简体、tc 繁体，`_v2` 是版本号），跟同名视频一起改。
@@ -24,7 +24,7 @@ docker compose up -d
 - TMDB 没有某部剧的 zh-CN 译名时，`name` 会回落到原名 / 英文，改名结果就是原名 / 英文，不是文件夹名。
 3. 改名**脱机完成**：只读本地 `tvshow.nfo` + `.orz/episodes.json`，每次改名**不调 TMDB**。TMDB 只在新建剧集（`create`）或刷新（`refresh`）时调一次，没网也能改名。
 
-启动时先全量扫一遍补漏：容器停机期间移入的文件，只要大小已稳定，第一次扫描就处理。
+启动时先加 watch 再全量扫一遍补漏：容器停机期间移入的文件，只要大小已稳定，第一次扫描就处理；启动后才到的文件会触发事件，不会漏。安全网：每小时全量复扫一次（防事件丢失 / 队列溢出），`ORZ_RESCAN_INTERVAL=0` 可关；inotify 不可用时自动回落到轮询（`ORZ_WATCH_MODE=poll`）。
 
 ## 命令行只是测试和排错用
 
@@ -91,7 +91,9 @@ pending 列表也存在 `.orz/state.json` 里（见下）。
 | `TMDB_API_KEY` | — | 必填，[TMDB](https://www.themoviedb.org/documentation/api) 申请 |
 | `TMDB_LANGUAGE` | `zh-CN` | 集名语言 |
 | `ORZ_WATCH_DIRS` | `/media/anime,/media/tv-series` | 监控目录，逗号分隔；带空格的路径不用转义，整个值加引号，如 `"/media/TV show,/media/Anime"`。程序内部用 `os.path` 处理路径、不拼 shell 命令，所以空格不会断开路径 |
-| `ORZ_SCAN_INTERVAL` | `30` | 轮询间隔（秒） |
+| `ORZ_WATCH_MODE` | `inotify` | 事件驱动；`poll` 为轮询回落 |
+| `ORZ_RESCAN_INTERVAL` | `3600` | 安全网全量复扫（秒），0 关 |
+| `ORZ_SCAN_INTERVAL` | `30` | 轮询模式间隔（秒） |
 | `ORZ_STABLE_SECONDS` | `5` | 文件大小不变几秒后才改名 |
 
 ## 本地开发

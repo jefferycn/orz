@@ -2,7 +2,8 @@
 
 Normal operation needs no commands: the Docker image's default
 command is ``watch``, which monitors ``/media/anime`` and
-``/media/tv-series`` in the background and renames offline.
+``/media/tv-series`` with inotify (events only, no polling) in the
+background and renames offline.
 
 Commands:
     create <show-folder>    TMDB lookup, write tvshow.nfo + season
@@ -23,8 +24,10 @@ Environment:
                        (NOT needed for folder / dry-run: offline)
     TMDB_LANGUAGE      default zh-CN
     ORZ_WATCH_DIRS     comma-separated roots, default /media/anime,/media/tv-series
+    ORZ_WATCH_MODE     inotify (default) or poll
+    ORZ_RESCAN_INTERVAL safety-net full rescan seconds, default 3600 (0 = off)
     ORZ_CACHE_DIR      TMDB HTTP response cache, default ./var/cache
-    ORZ_SCAN_INTERVAL  watch poll seconds, default 30
+    ORZ_SCAN_INTERVAL  poll-mode interval seconds, default 30
     ORZ_STABLE_SECONDS file size/mtime unchanged window, default 5
 """
 from __future__ import annotations
@@ -38,8 +41,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.tmdb import TmdbClient  # noqa: E402
 from app.watcher import (  # noqa: E402
-    DEFAULT_ROOTS, Watcher, create_show, process_season_folder,
-    refresh_show,
+    DEFAULT_RESCAN_INTERVAL, DEFAULT_ROOTS, EventWatcher, Watcher,
+    create_show, process_season_folder, refresh_show,
 )
 
 HELP = """Usage: orz <command> [arguments]
@@ -79,11 +82,20 @@ def _folder_command(season_dir: str, dry_run: bool) -> int:
     return 0
 
 
-def _watcher(dry_run: bool = False) -> Watcher:
-    return Watcher(
+def _watcher(dry_run: bool = False):
+    mode = os.environ.get("ORZ_WATCH_MODE", "inotify").lower()
+    if mode == "poll":
+        return Watcher(
+            _client(), _roots(),
+            interval=int(os.environ.get("ORZ_SCAN_INTERVAL", "30")),
+            stable_seconds=float(os.environ.get("ORZ_STABLE_SECONDS", "5")),
+            dry_run=dry_run,
+        )
+    return EventWatcher(
         _client(), _roots(),
-        interval=int(os.environ.get("ORZ_SCAN_INTERVAL", "30")),
         stable_seconds=float(os.environ.get("ORZ_STABLE_SECONDS", "5")),
+        rescan_interval=float(os.environ.get(
+            "ORZ_RESCAN_INTERVAL", str(DEFAULT_RESCAN_INTERVAL))),
         dry_run=dry_run,
     )
 
