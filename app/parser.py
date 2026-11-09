@@ -404,6 +404,69 @@ def is_organized(filename: str, show_title: str) -> bool:
     return bool(pattern.match(filename))
 
 
+# Markers that say "this is not a regular episode": specials,
+# trailers / previews, extras, openings / endings.  Such a file
+# must never be gap-filled into an episode number — a preview
+# called "30分钟前瞻PV" is not episode 5, and "Sp01" is not
+# episode 13.  Matched as whole tokens for the short codes
+# (``SP`` / ``PV`` / ``OP`` / ``ED`` / ``CM``), as substrings
+# for the longer words.
+_NON_EPISODE_TOKENS = {
+    "sp", "special", "specials", "extra", "extras", "pv", "op", "ed",
+    "ncop", "nced", "cm", "menu", "preview", "trailer", "teaser",
+}
+_NON_EPISODE_SUBSTRINGS = (
+    "special", "extra", "trailer", "preview", "teaser",
+    "预告", "特典", "花絮", "前瞻", "宣传", "先行",
+)
+# Short code + episode number, e.g. ``Sp01`` / ``Sp02`` — the token
+# is one word, so the plain token set above never sees bare ``sp``.
+_NON_EPISODE_CODE_RE = re.compile(r"(?i)^(sp|pv|op|ed|ncop|nced|cm)\d+$")
+
+
+def looks_like_non_episode(filename: str) -> bool:
+    """True for specials / trailers / extras / previews.
+
+    ``Sp01`` / ``Extras`` / ``30分钟前瞻PV`` / ``预告`` all match.
+    A normal episode name (``Show - S01E05 - Title``) does not.
+    """
+    stem = strip_lang_suffix(filename)
+    tokens = [t.lower() for t in re.split(r"[\s\-_\.\[\]\(\)]+", stem) if t]
+    if any(t in _NON_EPISODE_TOKENS for t in tokens):
+        return True
+    if any(_NON_EPISODE_CODE_RE.match(t) for t in tokens):
+        return True
+    lowered = stem.lower()
+    return any(s in lowered for s in _NON_EPISODE_SUBSTRINGS)
+
+
+def is_already_named(filename: str, folder_season: int | None) -> bool:
+    """Already carries an explicit episode marker for this folder?
+
+    Any format counts, not just orz's own ``Title - S01E05 - ...``:
+    ``Dragon Ball - S02E15 - ...`` in ``Season 2``,
+    ``Attack on Titan S01E01.mkv`` in ``Season 01`` and
+    ``A Sister's All You Need. E01 ...`` in ``Season 1`` are all
+    already organised — leave them alone.  Only the Western
+    markers count (``SxxEyy`` / ``NxNN`` / ``Season x Episode y`` /
+    ``Eyy`` / ``第x季第y集``): a bare number (``[Group] Show -
+    05.mkv``), a bracket ``[01]`` and a plain ``第x集`` / ``第x話``
+    are fansub naming that orz is meant to normalise (ReLIFE
+    ``第14話`` still gets renamed to ``S01E14``).  A marker for a
+    *different* season (``Season 2 - 05`` sitting in ``Season 01``)
+    is not "already named" — that file still needs to move.
+    """
+    guess = parse_episode(filename)
+    if guess.confidence != "high" or guess.episode is None:
+        return False
+    if guess.reason not in {"SxxEyy", "NxNN", "Season x Episode y",
+                            "Eyy", "第x季第y集"}:
+        return False
+    if guess.season is None:
+        return True  # Eyy: season is the folder's season.
+    return folder_season is None or guess.season == folder_season
+
+
 def organized_episode(filename: str) -> tuple[int, int] | None:
     """``(season, episode)`` from an already-organised filename."""
     m = re.search(r"(?i)\bS(\d{2})E(\d{2,3})\b", filename)

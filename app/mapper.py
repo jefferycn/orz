@@ -19,11 +19,40 @@ never written by the app) can pin the mapping:
 
 ``episode_map`` wins, then ``season_map`` + ``episode_offset``
 (or the computed absolute offset), then the automatic mapping.
+
+TMDB sometimes lists two real seasons under one TMDB season
+number: 青之箱 (Blue Box) is 37 episodes under TMDB season 1
+(25 real S1 + 12 real S2, which premiered Oct 2026), and 龙珠
+(Dragon Ball) is all 153 episodes under TMDB season 1.  The
+absolute offset must not come from TMDB's merged count (that
+is how 青之箱 S2E05 became S01E42 instead of S01E30).  When
+air dates are available (``air_dates``), a TMDB season is split
+into segments at any gap of more than ``_SPLIT_GAP_DAYS`` days
+between consecutive episodes' air dates — a season break, not
+a cour break (cours resume within ~3 months).  Segments, in
+order, are the show's real seasons for absolute counting:
+青之箱 splits into 25 + 12, so S2E05 -> 25 + 5 = S01E30.
 """
 from __future__ import annotations
 
 import json
 import os
+from datetime import date
+
+# An air-date gap longer than this inside one TMDB season is a
+# season break, not a cour break: cours resume within ~3 months,
+# real seasons are typically 6+ months apart (青之箱 S1 finale
+# Mar 2025 -> S2 premiere Oct 2026 is ~18 months).
+_SPLIT_GAP_DAYS = 150
+
+
+def _parse_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
 
 
 def load_override(show_dir: str) -> dict:
@@ -50,19 +79,40 @@ class EpisodeMapper:
     """
 
     def __init__(self, seasons: dict[int, dict[int, str]],
-                 override: dict | None = None):
+                 override: dict | None = None,
+                 air_dates: dict[int, dict[int, str | None]] | None = None):
         self.seasons = {int(s): {int(e): t for e, t in eps.items()}
                         for s, eps in seasons.items()}
         self.override = override or {}
-        # Cumulative episode counts in season order, for absolute mapping:
-        # _starts[season] = absolute number of the season's episode 1.
-        self._starts: dict[int, int] = {}
+        # Segments: each TMDB season, split at long air-date gaps
+        # (see module docstring).  A segment is {"season": tmdb
+        # season, "eps": [episode numbers, sorted], "start":
+        # absolute number of its first episode}.  Segments, in
+        # order, are the show's real seasons for absolute counting.
+        # Without air dates there is one segment per TMDB season,
+        # exactly the old behaviour.
+        self._segments: list[dict] = []
         total = 0
         for s in sorted(self.seasons):
             if s == 0:  # Specials are not part of the absolute count.
                 continue
-            self._starts[s] = total + 1
-            total += len(self.seasons[s])
+            eps = sorted(self.seasons[s])
+            dates = (air_dates or {}).get(s, {})
+            start_idx = 0
+            for i in range(1, len(eps) + 1):
+                split = False
+                if i < len(eps):
+                    d_prev = _parse_date(dates.get(eps[i - 1]))
+                    d_next = _parse_date(dates.get(eps[i]))
+                    if (d_prev is not None and d_next is not None
+                            and (d_next - d_prev).days > _SPLIT_GAP_DAYS):
+                        split = True
+                if i == len(eps) or split:
+                    seg_eps = eps[start_idx:i]
+                    self._segments.append({
+                        "season": s, "eps": seg_eps, "start": total + 1})
+                    total += len(seg_eps)
+                    start_idx = i
         self.total_episodes = total
         # Set by the renamer when the show already uses absolute
         # numbering in Season 01 (see renamer.py): S2 files then map
@@ -70,22 +120,35 @@ class EpisodeMapper:
         self.absolute_to: int | None = None
 
     # -- helpers -------------------------------------------------------
+    def _offset_before(self, file_season: int) -> int:
+        """Episodes in the real seasons before ``file_season``.
+
+        Real seasons are the segments, in order: file season 1 is
+        segment 0, file season 2 is segment 1, and so on.  When the
+        file season runs past every segment (TMDB merged even
+        more), the offset is every episode TMDB lists.
+        """
+        n = min(max(file_season - 1, 0), len(self._segments))
+        return sum(len(seg["eps"]) for seg in self._segments[:n])
+
     def _absolute_title(self, absolute: int) -> str:
-        """Episode title at an absolute position across TMDB seasons."""
-        n = 0
-        for s in sorted(self.seasons):
-            if s == 0:
-                continue
-            for ep in sorted(self.seasons[s]):
-                n += 1
-                if n == absolute:
-                    return self.seasons[s][ep]
-        return ""
+        """Episode title at an absolute position across the segments."""
+        mapped = self._from_absolute(absolute)
+        return mapped[2] if mapped else ""
+
     def _absolute(self, season: int, episode: int) -> int | None:
-        """Absolute episode number if the file season is a TMDB season."""
-        if season not in self._starts:
+        """Absolute episode number for a TMDB (season, episode).
+
+        Uses the last segment of that TMDB season, so an episode
+        past the season's end still continues arithmetically.
+        """
+        segs = [seg for seg in self._segments if seg["season"] == season]
+        if not segs:
             return None
-        return self._starts[season] + episode - 1
+        seg = segs[-1]
+        if episode in seg["eps"]:
+            return seg["start"] + seg["eps"].index(episode)
+        return seg["start"] + (episode - seg["eps"][0])
 
     def _from_absolute(self, absolute: int) -> tuple[int, int, str] | None:
         """Absolute number -> (season, episode, title).
@@ -99,18 +162,19 @@ class EpisodeMapper:
         Season 02" means in practice; the alternative (pending) would
         leave every split-cour Anime file unrenamed.
         """
-        seasons = [s for s in sorted(self.seasons) if s != 0]
-        if not seasons or absolute < 1:
+        if not self._segments or absolute < 1:
             return None
-        for s in seasons:
-            count = len(self.seasons[s])
-            start = self._starts[s]
-            if start <= absolute < start + count:
-                ep = absolute - start + 1
-                return s, ep, self.seasons[s].get(ep, "")
-        last = seasons[-1]
-        ep = absolute - self._starts[last] + 1
-        return last, ep, self.seasons[last].get(ep, "")
+        for seg in self._segments:
+            start, end = seg["start"], seg["start"] + len(seg["eps"]) - 1
+            if start <= absolute <= end:
+                ep = seg["eps"][absolute - start]
+                return (seg["season"], ep,
+                        self.seasons[seg["season"]].get(ep, ""))
+        last = self._segments[-1]
+        end = last["start"] + len(last["eps"]) - 1
+        ep = last["eps"][-1] + (absolute - end)
+        return (last["season"], ep,
+                self.seasons[last["season"]].get(ep, ""))
 
     def _episode_title(self, season: int, episode: int) -> str:
         return self.seasons.get(season, {}).get(episode, "")
@@ -139,15 +203,14 @@ class EpisodeMapper:
         # Season 01 already holds episodes past TMDB S1's count
         # (e.g. 青之箱 S01E26-29 are really S2E01-04), so every
         # S2+ file continues the absolute run in Season 01 instead
-        # of starting a Season 02.  Title comes from the absolute
-        # position across TMDB seasons, so S2E05 still gets its
-        # S2 title (e.g. 戻ってきたよ) as S01E30.
+        # of starting a Season 02.  The offset counts real seasons
+        # (segments), not TMDB's merged season lengths, so S2E05
+        # is 25 + 5 = S01E30 even though TMDB lists 青之箱 S1 as
+        # 37 episodes.  Title comes from the absolute position
+        # across TMDB seasons, so S2E05 still gets its S2 title
+        # (e.g. 戻ってきたよ) as S01E30.
         if self.absolute_to is not None:
-            absolute = file_episode
-            for s in sorted(self.seasons):
-                if s == 0 or s >= season:
-                    continue
-                absolute += len(self.seasons[s])
+            absolute = self._offset_before(season) + file_episode
             return self.absolute_to, absolute, self._absolute_title(absolute)
 
         # 2. Direct hit: the file season exists in TMDB.
@@ -167,15 +230,14 @@ class EpisodeMapper:
 
         # 4. Absolute mapping: file season is beyond TMDB's seasons.
         # The file's numbering restarts at its own S2E01, so its
-        # absolute number is (episodes in all earlier TMDB seasons)
-        # + file_episode.  Earlier seasons are TMDB's own counts;
-        # for a file season past the last TMDB season, "earlier" is
-        # every TMDB season.
+        # absolute number is (episodes in all earlier real seasons)
+        # + file_episode.  Earlier seasons are the segments before
+        # this file season — not TMDB's merged counts (青之箱:
+        # TMDB S1 = 37, but the real S1 is 25, so S2E05 is 30).
+        # For a file season past the last segment, "earlier" is
+        # every episode TMDB lists.
         if season not in self.seasons:
-            absolute = self.total_episodes + file_episode
-            # If the file season is e.g. S3 while TMDB has S1 only,
-            # S2's episodes are unknown — still count from the end of
-            # TMDB, which is the best available interpretation.
+            absolute = self._offset_before(season) + file_episode
             mapped = self._from_absolute(absolute)
             if mapped:
                 return mapped

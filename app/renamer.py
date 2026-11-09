@@ -30,10 +30,11 @@ import os
 import re
 
 from .mapper import EpisodeMapper, load_override
+from .nfo import find_season_dir
 from .parser import (
     MEDIA_EXTS, SUBTITLE_EXTS, VIDEO_EXTS, base_name, batch_parse,
-    is_organized, lang_suffix, organized_episode, parse_episode,
-    season_number_from_folder,
+    is_already_named, lang_suffix, looks_like_non_episode,
+    organized_episode, parse_episode, season_number_from_folder,
 )
 
 log = logging.getLogger("orz.renamer")
@@ -195,7 +196,7 @@ def rename_season_folder(season_dir: str, show_title: str, show_dir: str,
     _reps = []
     _rep_of_group: dict[str, str] = {}
     for base, files in _groups.items():
-        if all(is_organized(f, show_title) for f in files):
+        if all(is_already_named(f, season) for f in files):
             continue
         rep = next((f for f in files
                     if f.rsplit(".", 1)[-1].lower() in VIDEO_EXTS), files[0])
@@ -207,8 +208,14 @@ def rename_season_folder(season_dir: str, show_title: str, show_dir: str,
                  "shared text", len(_batch))
 
     for base, files in group_files(season_dir).items():
-        # Whole group already organised -> skip.
-        if all(is_organized(f, show_title) for f in files):
+        # Whole group already organised -> skip.  "Organised" means
+        # the filename already carries an explicit episode marker
+        # for this folder's season, in any format — orz's own
+        # ``Title - S01E05 - ...`` *or* the library's existing
+        # ``Dragon Ball - S02E15 - ...`` / ``Show S01E01.mkv`` /
+        # ``Show E01 ...``.  Only files without such a marker are
+        # orz's to normalise.
+        if all(is_already_named(f, season) for f in files):
             result.skipped.extend(files)
             continue
         # Still being copied/moved in: do not touch it this scan.
@@ -221,7 +228,7 @@ def rename_season_folder(season_dir: str, show_title: str, show_dir: str,
                 "reason": "file still copying/moving (size not stable yet), "
                           "will retry next scan"})
             continue
-        if any(is_organized(f, show_title) for f in files):
+        if any(is_already_named(f, season) for f in files):
             # Mixed group: organised files stay, the rest follow them.
             ep = next(organized_episode(f)[1]
                       for f in files if organized_episode(f))
@@ -238,9 +245,10 @@ def rename_season_folder(season_dir: str, show_title: str, show_dir: str,
             ep = known[fingerprint]
             mapped = mapper.map(season, ep)
             if mapped and mapped[1] not in taken - {ep}:
-                _rename_group(season_dir, show_title, files, season,
+                _rename_group(season_dir, show_title, files, mapped[0],
                               mapped[1], mapper, result, dry_run, taken,
-                              target_season=mapped[0], known=known, show_dir=show_dir)
+                              ep_title=mapped[2], known=known,
+                              show_dir=show_dir)
                 continue
             result.pending.append({"file": video,
                                    "reason": "stored episode no longer maps"})
@@ -280,6 +288,15 @@ def rename_season_folder(season_dir: str, show_title: str, show_dir: str,
             continue
 
         # 3. No trustworthy number: gap-fill (lowest gap, else max + 1).
+        # Never for a file that looks like a special / trailer /
+        # extra: "Sp01", "30分钟前瞻PV", "Sherlock...Extras" are
+        # not episodes, and gap-filling them invents one.
+        if looks_like_non_episode(video):
+            result.pending.append({
+                "file": video,
+                "reason": "looks like a special/trailer/extra, "
+                          "not an episode — left alone"})
+            continue
         ep = lowest_gap(taken)
         mapped = mapper.map(season, ep)
         if mapped is None:
@@ -307,7 +324,6 @@ def _rename_group(season_dir: str, show_title: str, files: list[str],
                   season: int, episode: int, mapper: EpisodeMapper,
                   result: RenameResult, dry_run: bool, taken: set[int],
                   fingerprint: str | None = None, ep_title: str | None = None,
-                  target_season: int | None = None,
                   inferred: bool = False,
                   known: dict | None = None,
                   show_dir: str | None = None) -> None:
@@ -317,13 +333,15 @@ def _rename_group(season_dir: str, show_title: str, files: list[str],
     # episodes): the filename just omits the " - title" part.
     # Absolute mapping can land in a different season than the folder
     # the file sits in (S2E01 -> S01E13): move it to that season's
-    # folder when it exists, instead of leaving a S01E13 file in
-    # Season 02.
+    # folder when one exists, reusing the user's own folder name
+    # (``Season 1``, not a newly invented ``Season 01``).  When no
+    # folder for the target season exists, the file stays where it
+    # is — orz never creates season folders during a rename.
     dest_dir = season_dir
     if show_dir and season != season_number_from_folder(
             os.path.basename(season_dir)):
-        target_dir = os.path.join(show_dir, f"Season {season:02d}")
-        if os.path.isdir(target_dir):
+        target_dir = find_season_dir(show_dir, season)
+        if target_dir is not None:
             dest_dir = target_dir
     for filename in files:
         new = target_filename(show_title, season, episode, ep_title, filename)

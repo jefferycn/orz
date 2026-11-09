@@ -18,8 +18,16 @@ How it works
 ------------
 * Startup: one catch-up scan (the polling ``scan_once``), so
   anything that arrived while the container was down is processed
-  at once; then inotify watches are added recursively to the roots,
-  show folders and season folders.
+  at once — but only directories that *changed* since the last
+  recorded snapshot (``<show>/.orz/snapshots.json``).  A directory
+  with no changes is not opened, not refreshed and not renamed,
+  however many restarts happen.  After every processed directory
+  its new snapshot is recorded, so the next startup skips it.
+  The first run after upgrading has no snapshots and processes
+  everything once (to build the baseline); files that already
+  carry an explicit episode marker are still left alone by the
+  renamer, so that baseline pass renames nothing that was
+  already organised.
 * A change event marks only the affected directory dirty; it is
   processed ``stable_seconds`` (default 5 s) after the *last*
   event in it, so a slow copy keeps pushing its deadline back and
@@ -50,6 +58,7 @@ re-guesses or re-renames the same file.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import select
@@ -64,11 +73,15 @@ from .inotify import (
 )
 from .mapper import EpisodeMapper, load_override
 from .nfo import generate_nfo, generate_season_folders, read_nfo
-from .parser import is_organized, parse_folder_name, season_number_from_folder
+from .parser import (
+    is_already_named, parse_folder_name, season_number_from_folder,
+)
 from .renamer import RenameResult, group_files, rename_season_folder
 from .tmdb import TmdbClient
 
 log = logging.getLogger("orz.watcher")
+
+SNAPSHOT_FILENAME = "snapshots.json"
 
 DEFAULT_ROOTS = ["/media/anime", "/media/tv-series"]
 DEFAULT_INTERVAL = 30        # seconds between scans (polling fallback)
@@ -90,6 +103,67 @@ def _snapshot(path: str) -> tuple | None:
         return (st.st_mtime_ns, tuple(sorted(os.listdir(path))))
     except OSError:
         return None
+
+
+def _snapshot_json(snap: tuple | None) -> list | None:
+    """JSON form of a snapshot: ``[mtime_ns, [names...]]``."""
+    return [snap[0], list(snap[1])] if snap is not None else None
+
+
+def _snapshots_path(show_dir: str) -> str:
+    return os.path.join(show_dir, ".orz", SNAPSHOT_FILENAME)
+
+
+def load_snapshots(show_dir: str) -> dict[str, list]:
+    """Per-season snapshots for one show (``{}`` when none yet).
+
+    Keys are season folder names (``Season 01``, ``Season 1``,
+    ``Specials``).  The file lives in ``<show>/.orz/`` next to the
+    episode cache, so it survives container restarts and rebuilds.
+    """
+    path = _snapshots_path(show_dir)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_snapshots(show_dir: str, snaps: dict[str, list]) -> None:
+    path = _snapshots_path(show_dir)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(snaps, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def _record_snapshot(show_dir: str, season_dir: str) -> None:
+    """Record a season dir's current snapshot (after processing it)."""
+    snap = _snapshot_json(_snapshot(season_dir))
+    if snap is None:
+        return
+    snaps = load_snapshots(show_dir)
+    snaps[os.path.basename(season_dir.rstrip("/"))] = snap
+    save_snapshots(show_dir, snaps)
+
+
+def _snapshot_unchanged(show_dir: str, season_dir: str) -> bool:
+    """True when this season dir matches its recorded snapshot."""
+    snap = _snapshot_json(_snapshot(season_dir))
+    if snap is None:
+        return False
+    stored = load_snapshots(show_dir).get(
+        os.path.basename(season_dir.rstrip("/")))
+    return stored is not None and stored == snap
+
+
+def _has_still_copying(result) -> bool:
+    return result is not None and any(
+        "still copying" in p.get("reason", "") for p in result.pending)
 
 
 def create_show(show_dir: str, client: TmdbClient, dry_run: bool = False) -> bool:
@@ -117,8 +191,10 @@ def create_show(show_dir: str, client: TmdbClient, dry_run: bool = False) -> boo
     for p in created:
         log.info("Created %s", p)
     seasons = client.all_seasons(show["id"])
+    air_dates = client.all_air_dates(show["id"])
     cache = save_episodes(show_dir, show["id"],
-                          show_data.get("name") or title, seasons)
+                          show_data.get("name") or title, seasons,
+                          air_dates=air_dates)
     log.info("Saved episode cache %s (%d seasons)", cache, len(seasons))
     return True
 
@@ -143,8 +219,10 @@ def refresh_show(show_dir: str, client: TmdbClient, dry_run: bool = False) -> bo
     generate_nfo(show_data, show_dir)
     generate_season_folders(show_data, show_dir)
     seasons = client.all_seasons(show["id"])
+    air_dates = client.all_air_dates(show["id"])
     save_episodes(show_dir, show["id"],
-                  show_data.get("name") or title, seasons)
+                  show_data.get("name") or title, seasons,
+                  air_dates=air_dates)
     log.info("Refreshed %s (TMDB id %s, %d seasons)", title,
              show["id"], len(seasons))
     return True
@@ -176,9 +254,12 @@ def process_season_folder(season_dir: str, dry_run: bool = False,
     # keeps lazy refresh lazy — the startup catch-up scan must not
     # turn into a refresh of every old show on disk, only the shows
     # that actually have files waiting.
+    folder_season = season_number_from_folder(
+        os.path.basename(season_dir.rstrip("/")))
     groups = group_files(season_dir)
     unorganised = [files for files in groups.values()
-                   if not all(is_organized(f, nfo["title"]) for f in files)]
+                   if not all(is_already_named(f, folder_season)
+                              for f in files)]
     if not unorganised:
         result = RenameResult()
         result.skipped = [f for files in groups.values() for f in files]
@@ -212,7 +293,27 @@ def process_season_folder(season_dir: str, dry_run: bool = False,
             log.warning("Refresh of %s did not write an episode cache",
                         show_dir)
             return None
-    mapper = EpisodeMapper(cached["seasons"], load_override(show_dir))
+    # Caches written before v2.7 have no air dates, and without
+    # them the mapper cannot tell a merged TMDB season apart
+    # (青之箱 S1 = 37 on TMDB is really 25 + 12).  Backfill the
+    # dates once, only for a show that actually has files waiting
+    # (the unorganised check above already returned for the rest),
+    # and only the dates — no nfo rewrite, no season folders.
+    if client is not None and not cached.get("air_dates"):
+        try:
+            air_dates = client.all_air_dates(nfo["tmdbid"])
+        except Exception as e:  # noqa: BLE001 - keep renaming offline
+            log.warning("Could not backfill air dates for %s: %s",
+                        nfo["title"], e)
+        else:
+            if air_dates:
+                save_episodes(show_dir, nfo["tmdbid"],
+                              cached.get("title") or nfo["title"],
+                              cached["seasons"], air_dates=air_dates)
+                cached["air_dates"] = air_dates
+                log.info("Backfilled air dates for %s", nfo["title"])
+    mapper = EpisodeMapper(cached["seasons"], load_override(show_dir),
+                           cached.get("air_dates"))
     result = rename_season_folder(season_dir, nfo["title"], show_dir,
                                   mapper, dry_run=dry_run,
                                   stable_files=stable_files)
@@ -303,8 +404,14 @@ class Watcher:
                 nfo_path = os.path.join(show_dir, "tvshow.nfo")
                 if not os.path.exists(nfo_path):
                     # New show: only create once the folder listing
-                    # has been stable across two scans.
-                    if was_stable:
+                    # has been stable across two scans — or the
+                    # folder is old (it arrived while the container
+                    # was down, so its mtime is already past the
+                    # stability window and no second scan will come
+                    # from an event that never fired).
+                    old_enough = (time.time() - snap[0] / 1e9
+                                  > self.stable_seconds)
+                    if was_stable or old_enough:
                         create_show(show_dir, self.client,
                                     dry_run=self.dry_run)
                     continue
@@ -316,12 +423,21 @@ class Watcher:
                         continue
                     s_snap = _snapshot(season_dir)
                     self.dir_snaps[season_dir] = s_snap
+                    if _snapshot_unchanged(show_dir, season_dir):
+                        # No change since the last run: do not open
+                        # it, do not refresh it, do not rename in it.
+                        continue
                     stable_files = self._stable_files_in(season_dir)
                     result = process_season_folder(
                         season_dir, dry_run=self.dry_run,
                         stable_files=stable_files, client=self.client)
                     if result is None and show_dir not in self._warned_no_cache:
                         self._warned_no_cache.add(show_dir)
+                    # Record the new snapshot — unless a file is
+                    # still being copied (its size will change, and
+                    # the next scan must see it again).
+                    if result is not None and not _has_still_copying(result):
+                        _record_snapshot(show_dir, season_dir)
 
     def watch(self) -> None:
         """Poll forever.  The first scan is a catch-up scan (see module docstring)."""
@@ -461,13 +577,20 @@ class EventWatcher:
     def _process_season_dir(self, season_dir: str) -> None:
         if not os.path.isdir(season_dir):
             return
+        if _snapshot_unchanged(os.path.dirname(season_dir.rstrip("/")),
+                               season_dir):
+            # The event that marked this dir dirty changed nothing
+            # since the last processed snapshot (e.g. orz's own
+            # rename) — nothing to do.
+            return
         stable = self._poller._stable_files_in(season_dir)
         result = process_season_folder(
             season_dir, dry_run=self.dry_run, stable_files=stable,
             client=self.client)
-        if result is not None and any(
-                "still copying" in p.get("reason", "")
-                for p in result.pending):
+        if result is not None and not _has_still_copying(result):
+            _record_snapshot(os.path.dirname(season_dir.rstrip("/")),
+                             season_dir)
+        if _has_still_copying(result):
             # A file in this folder is still being written: retry
             # after another stability window, without waiting for
             # a new event (there may not be one).

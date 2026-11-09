@@ -1,4 +1,4 @@
-# orz 2.0
+# orz 2.7
 
 Jellyfin 剧集自动改名：监控 NAS 上的 TV series / Anime 目录，新建剧集文件夹时查 TMDB 写 `tvshow.nfo`、建季文件夹；视频和字幕移入季文件夹后自动按规则改名。Python 3.12 重写（原版是 PHP），只用标准库。
 
@@ -7,12 +7,13 @@ Jellyfin 剧集自动改名：监控 NAS 上的 TV series / Anime 目录，新�
 容器跑起来就自动监控，不需要手动执行任何命令：
 
 ```shell
-docker compose up -d
+cp .env.example .env   # 填好 TMDB_API_KEY
+docker compose up -d --build
 ```
 
 它在后台用 inotify 监控 `/media/TV show` 和 `/media/Anime`（事件驱动，不轮询）：文件或文件夹一有改动才处理，没改动时不读目录。inotify 是直接调 libc（标准库 ctypes），不用装 `inotify-tools`，也不用新依赖。
 
-1. 新建文件夹 `绝望主妇 (2004)`、`罗梅莉亚战记 (2026)` → 查 TMDB，写 `tvshow.nfo`、建 `Season 01` / `Specials`、并把集列表缓存到 `.orz/episodes.json`。
+1. 新建文件夹 `绝望主妇 (2004)`、`罗梅莉亚战记 (2026)` → 查 TMDB，写 `tvshow.nfo`、建季文件夹（已有 `Season 1` 这种写法时沿用，不另建 `Season 01`）、并把集列表缓存到 `.orz/episodes.json`。
 2. 视频 / 字幕文件移入季文件夹 → 等文件大小稳定几秒（复制未完成不改名），按 `剧名 - S01E01 - 集名.mkv` 改名，字幕保留 `.zh.srt` / `.en.ass` / `.sc_v2.ass` / `.tc_v2.ass` 等语言后缀（sc 简体、tc 繁体，`_v2` 是版本号），跟同名视频一起改。
 
 ### 剧名用中文还是英文？
@@ -24,7 +25,9 @@ docker compose up -d
 - TMDB 没有某部剧的 zh-CN 译名时，`name` 会回落到原名 / 英文，改名结果就是原名 / 英文，不是文件夹名。
 3. 改名**脱机完成**：只读本地 `tvshow.nfo` + `.orz/episodes.json`，每次改名**不调 TMDB**。TMDB 只在新建剧集（`create`）、刷新（`refresh`）时调一次，没网也能改名。旧版 PHP 留下的剧只有 nfo、没有集缓存：第一次有文件放进它的季文件夹时，程序会去 TMDB 取一次缓存、同一轮就把文件改了，不用手动 `refresh`；取不到（文件夹名跟 TMDB 对不上）就记 warning、文件不动，10 分钟内不再重试。
 
-启动时先加 watch 再全量扫一遍补漏：容器停机期间移入的文件，只要大小已稳定，第一次扫描就处理；启动后才到的文件会触发事件，不会漏。安全网默认是关的（全量复扫 `ORZ_RESCAN_INTERVAL=0`），只在 inotify 队列溢出时复扫一次；想开每小时复扫就设 `ORZ_RESCAN_INTERVAL=3600`。inotify 不可用时自动回落到轮询（`ORZ_WATCH_MODE=poll`）。
+启动时先加 watch 再扫一遍补漏：容器停机期间移入的文件，只要大小已稳定，第一次扫描就处理；启动后才到的文件会触发事件，不会漏。**补扫只处理自上次记录以来有改动的目录**：每个季文件夹的快照（修改时间 + 文件列表）存在本剧 `.orz/snapshots.json` 里，没改动的目录启动时直接跳过，不打开、不刷新、不改名。安全网默认是关的（全量复扫 `ORZ_RESCAN_INTERVAL=0`），只在 inotify 队列溢出时复扫一次；想开每小时复扫就设 `ORZ_RESCAN_INTERVAL=3600`。inotify 不可用时自动回落到轮询（`ORZ_WATCH_MODE=poll`）。
+
+已经按 `SxxEyy` / `Eyy` / `第x集` 命名的文件一律不动，不管它原来是什么语言、什么格式：`Dragon Ball - S02E15 - ...` 放在 `Season 2` 里、`Attack on Titan S01E01.mkv`、`A Sister's All You Need. E01 ...` 都算已经整理好，orz 不会再去“纠正”它。只有文件名里没有明确集数标记的文件才是 orz 要改的（比如 `[Group] Show - 05.mkv`）。季标记和文件夹季号不一致的文件仍会处理（比如 `Season 2 - 05` 放在 `Season 01` 里）。
 
 ## 命令行只是测试和排错用
 
@@ -47,6 +50,7 @@ docker exec orz python3 orz.py scan     # 手动跑一轮轮询
   - `file still copying/moving (size not stable yet)` —— 还在复制，下轮再试；
   - `episode 13 has no TMDB match` —— 集数超出已知范围；
   - `episode 2 already exists (collision, not overwriting)` —— 目标集已存在，绝不覆盖；
+  - `looks like a special/trailer/extra, not an episode — left alone` —— 特典 / 预告 / 花絮不是正片，不补位、不改名；
   - `no number found` —— 文件名里找不到可信集数，且无法补位。
 - `No episode cache ...` —— 旧版 PHP 留下的剧只有 nfo、没有集缓存，`watch` / `scan` 会在第一次有文件进来时自动去 TMDB 取一次（懒刷新）；`folder` / `dry-run` 是脱机的，没有 TMDB 客户端，才会提示手动跑一次 `refresh`。
 
@@ -66,7 +70,9 @@ pending 列表也存在 `.orz/state.json` 里（见下）。
 
 还有一种常见情况：TMDB 明明有 S2，但 Season 01 里已经按绝对编号放了 S2 的前几集（青之箱：`S01E26-29` 其实是 S2E01-04）。这时程序认出 Season 01 已有超出 S1 集数的集，自动按绝对编号继续：`S2E05` → `S01E30`，集名仍取 S2E05 的标题（`戻ってきたよ`）。`Season 2 - 05` 这种写法也认得出：`Season 2` 是季、`05` 是集，不会把 2 和 05 当成两个候选集数。
 
-**3. 追剧时往已有 5 集的季文件夹放单集。** 先读已改好名的文件，算出已有集数和缺口：没数字的文件先补**最小缺口**（有 1、2、3、5 → 补 4），没缺口则取 max+1（有 1–5 → 6）。映射结果存在 `.orz/state.json`（文件指纹 → 集数），重扫不再重新猜。
+TMDB 有时会把两季并在一季里列（青之箱：TMDB S1 列了 37 集，其实是 25 集 S1 + 12 集 S2；龙珠：153 集全在 TMDB S1 里）。这时偏移量不能直接用 TMDB 的季长度：程序把每集的播出日期也存进 `.orz/episodes.json`，同一季里播出日期断档超过 150 天就切一刀（两季之间通常隔半年以上，两 part 之间只隔两三个月），切出来的段才是真正的季——青之箱切成 25 + 12，`S2E05` 就是 25 + 5 = `S01E30`，不会再算成 42。
+
+**3. 追剧时往已有 5 集的季文件夹放单集。** 先读已改好名的文件，算出已有集数和缺口：没数字的文件先补**最小缺口**（有 1、2、3、5 → 补 4），没缺口则取 max+1（有 1–5 → 6）。映射结果存在 `.orz/state.json`（文件指纹 → 集数），重扫不再重新猜。**补位只给正片文件**：名字带 `Sp` / `Special` / `Extras` / `PV` / `预告` / `特典` / `花絮` / `前瞻` / `Trailer` 的（特典、预告片、花絮）永远不补位、不改名，记为 pending——`Sp01` 不是第 13 集，`30分钟前瞻PV` 也不是第 5 话。
 
 ## 文件布局
 
@@ -75,7 +81,8 @@ pending 列表也存在 `.orz/state.json` 里（见下）。
 ├── tvshow.nfo                 # TMDB 信息
 ├── orz.json                    # 可选，用户手写覆盖（程序只读）
 ├── .orz/
-│   ├── episodes.json          # 集列表缓存（create/refresh 时写）
+│   ├── episodes.json          # 集列表缓存（create/refresh 时写，含播出日期）
+│   ├── snapshots.json         # 各季文件夹快照（启动补扫只处理改动过的目录）
 │   └── state.json             # 文件指纹→集数 + pending 列表
 ├── Season 01/
 │   └── 罗梅莉亚战记 - S01E01 - 第1集.mkv
@@ -95,6 +102,17 @@ pending 列表也存在 `.orz/state.json` 里（见下）。
 | `ORZ_RESCAN_INTERVAL` | `0` | 安全网全量复扫（秒），0 关；只在队列溢出时复扫 |
 | `ORZ_SCAN_INTERVAL` | `30` | 轮询模式间隔（秒） |
 | `ORZ_STABLE_SECONDS` | `5` | 文件大小不变几秒后才改名 |
+
+## 出了问题怎么恢复
+
+如果某次运行改错了文件（比如 v2.6 第一次启动的 55 个文件），`tools/restore_from_log.py` 能按日志里的 `Renamed` 记录把文件移回原名。先停掉容器（否则它会立刻再改一遍），再：
+
+```shell
+docker compose run --rm --build orz python3 tools/restore_from_log.py --dry-run
+docker compose run --rm --build orz python3 tools/restore_from_log.py
+```
+
+只恢复表里那 55 条记录：旧路径已存在、找不到、找到多个时都跳过，绝不覆盖；还会删掉受影响剧里过期的 `.orz/state.json`，以及空的重名季文件夹（比如 refresh 建出来的空 `Season 01`，而剧本身用 `Season 1`）。
 
 ## 本地开发
 

@@ -1,4 +1,6 @@
-# orz 2.0 — 示例 compose。平时不用敲命令：容器启动后自动监控。
+# orz — compose 文件。先 cp .env.example .env 填好 TMDB_API_KEY，再：
+#   docker compose up -d --build
+# 平时不用敲命令：容器启动后自动监控。
 services:
   orz:
     build: .

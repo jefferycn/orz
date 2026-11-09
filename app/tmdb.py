@@ -107,6 +107,13 @@ class TmdbClient:
         return {ep["episode_number"]: ep.get("name") or ""
                 for ep in data.get("episodes", [])}
 
+    def season_air_dates(self, show_id: int, season_number: int
+                         ) -> dict[int, str | None]:
+        """``{episode_number: "YYYY-MM-DD" | None}`` for one season."""
+        data = self.get_season(show_id, season_number)
+        return {ep["episode_number"]: ep.get("air_date") or None
+                for ep in data.get("episodes", [])}
+
     def all_seasons(self, show_id: int) -> dict[int, dict[int, str]]:
         """``{season_number: {episode_number: title}}`` for every season."""
         show = self.get_tvshow(show_id)
@@ -114,4 +121,18 @@ class TmdbClient:
         for s in show.get("seasons", []):
             n = s["season_number"]
             out[n] = self.season_episodes(show_id, n)
+        return out
+
+    def all_air_dates(self, show_id: int
+                      ) -> dict[int, dict[int, str | None]]:
+        """``{season_number: {episode_number: air_date}}`` for every season.
+
+        Uses the same file-cached ``/season/{n}`` responses as
+        ``all_seasons``, so the second pass costs no extra API calls.
+        """
+        show = self.get_tvshow(show_id)
+        out: dict[int, dict[int, str | None]] = {}
+        for s in show.get("seasons", []):
+            n = s["season_number"]
+            out[n] = self.season_air_dates(show_id, n)
         return out

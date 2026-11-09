@@ -38,6 +38,9 @@ class FakeTmdb:
     def all_seasons(self, show_id):
         return self.seasons
 
+    def all_air_dates(self, show_id):
+        return {}
+
 
 def _make_show(root, with_cache=False, cache_tmdbid=1):
     show_dir = os.path.join(root, "Show (2024)")

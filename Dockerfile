@@ -4,6 +4,7 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY app/ ./app/
 COPY orz.py ./orz.py
+COPY tools/ ./tools/
 
 # Default command is the watch daemon — not the CLI.
 # The container monitors /media/anime and /media/tv-series on its own;

@@ -29,8 +29,17 @@ def episodes_path(show_dir: str) -> str:
 
 
 def save_episodes(show_dir: str, tmdbid: int, title: str,
-                  seasons: dict[int, dict[int, str]]) -> str:
-    """Persist the episode map; returns the path written."""
+                  seasons: dict[int, dict[int, str]],
+                  air_dates: dict[int, dict[int, str | None]] | None = None
+                  ) -> str:
+    """Persist the episode map; returns the path written.
+
+    ``air_dates`` (``{season: {episode: "YYYY-MM-DD"}}``) is stored
+    alongside the titles: TMDB sometimes lists two real seasons
+    under one TMDB season number (青之箱 S1 = 37 episodes on TMDB
+    = 25 + 12), and the air-date gap between the two runs is what
+    tells them apart (see mapper.py).
+    """
     data = {
         "tmdbid": tmdbid,
         "title": title,
@@ -38,6 +47,10 @@ def save_episodes(show_dir: str, tmdbid: int, title: str,
         "seasons": {str(s): {str(e): t for e, t in eps.items()}
                     for s, eps in seasons.items()},
     }
+    if air_dates:
+        data["air_dates"] = {
+            str(s): {str(e): d for e, d in eps.items() if d}
+            for s, eps in air_dates.items() if eps}
     path = episodes_path(show_dir)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
@@ -52,6 +65,9 @@ def load_episodes(show_dir: str) -> dict | None:
 
     Keys are converted back to int.  A corrupt file is treated as
     missing (the caller logs it and tells the user to run refresh).
+    ``air_dates`` (when present) comes back the same way, as
+    ``{int: {int: str}}``; a cache written before air dates were
+    stored simply has none.
     """
     path = episodes_path(show_dir)
     if not os.path.exists(path):
@@ -69,4 +85,11 @@ def load_episodes(show_dir: str) -> dict | None:
     except (ValueError, AttributeError):
         return None
     data["seasons"] = seasons
+    air_dates = data.get("air_dates") or {}
+    try:
+        data["air_dates"] = {
+            int(s): {int(e): d for e, d in eps.items()}
+            for s, eps in air_dates.items()}
+    except (ValueError, AttributeError):
+        data["air_dates"] = {}
     return data
