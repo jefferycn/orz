@@ -97,6 +97,8 @@ TMDB 有时会把两季并在一季里列（青之箱：TMDB S1 列了 37 集，
 | --- | --- | --- |
 | `TMDB_API_KEY` | — | 必填，[TMDB](https://www.themoviedb.org/documentation/api) 申请 |
 | `TMDB_LANGUAGE` | `zh-CN` | 集名语言 |
+| `NAS_TV_DIR` | `/volume1/TV show` | NAS 本地电视剧目录（compose 挂载的冒号左边）；`.env` 里没有时用默认值 |
+| `NAS_ANIME_DIR` | `/volume1/Anime` | NAS 本地动画目录，同上 |
 | `ORZ_WATCH_DIRS` | `/media/anime,/media/tv-series` | 监控目录，逗号分隔；带空格的路径不用转义，整个值加引号，如 `"/media/TV show,/media/Anime"`。程序内部用 `os.path` 处理路径、不拼 shell 命令，所以空格不会断开路径 |
 | `ORZ_WATCH_MODE` | `inotify` | 事件驱动；`poll` 为轮询回落 |
 | `ORZ_RESCAN_INTERVAL` | `0` | 安全网全量复扫（秒），0 关；只在队列溢出时复扫 |
@@ -111,6 +113,8 @@ TMDB 有时会把两季并在一季里列（青之箱：TMDB S1 列了 37 集，
 docker compose run --rm --build orz python3 tools/restore_from_log.py --dry-run
 docker compose run --rm --build orz python3 tools/restore_from_log.py
 ```
+
+（docker compose 是 v1（`docker-compose`，连字符）时，`run` 没有 `--build` 参数，先单独跑一次 `docker-compose build`，再 `docker-compose run --rm orz python3 tools/restore_from_log.py`；`up -d --build` 在 v1 里是有的。）
 
 只恢复表里那 86 条记录：旧路径已存在、找不到、找到多个时都跳过，绝不覆盖；还会删掉受影响剧里过期的 `.orz/state.json`，以及空的重名季文件夹（比如 refresh 建出来的空 `Season 01`，而剧本身用 `Season 1`）。
 

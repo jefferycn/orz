@@ -7,9 +7,10 @@ services:
     container_name: orz
     restart: unless-stopped
     volumes:
-      # 剧集目录（群晖 NAS 路径按实际情况改；带空格的路径要加引号）
-      - "/volume1/TV show:/media/TV show"
-      - "/volume1/Anime:/media/Anime"
+      # 剧集目录：NAS 本地路径从 .env 读（NAS_TV_DIR / NAS_ANIME_DIR），
+      # .env 里没有时回落到下面的默认值；冒号右边是容器内路径，别改。
+      - "${NAS_TV_DIR:-/volume1/TV show}:/media/TV show"
+      - "${NAS_ANIME_DIR:-/volume1/Anime}:/media/Anime"
     environment:
       TMDB_API_KEY: ${TMDB_API_KEY:?请在 .env 里设置 TMDB_API_KEY}
       TMDB_LANGUAGE: zh-CN
