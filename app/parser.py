@@ -387,11 +387,19 @@ def batch_parse(filenames: list[str]) -> dict[str, EpisodeGuess]:
 
 
 def season_number_from_folder(folder_name: str) -> int | None:
-    """``Season 01`` -> 1, ``Specials`` -> 0, else None."""
+    """``Season 01`` -> 1, ``Specials`` -> 0, else None.
+
+    Short season folders count too: ``S02`` / ``S03`` (Banshee's
+    layout).  Without this the event watcher treats an ``S02``
+    folder as a show folder and warns "No TMDB match" for it.
+    """
     name = folder_name.strip()
     if name.lower() == "specials":
         return 0
     m = re.match(r"(?i)season\s*(\d+)", name)
+    if m:
+        return int(m.group(1))
+    m = re.match(r"(?i)^S(\d{1,2})$", name)
     return int(m.group(1)) if m else None
 
 

@@ -105,14 +105,16 @@ TMDB 有时会把两季并在一季里列（青之箱：TMDB S1 列了 37 集，
 
 ## 出了问题怎么恢复
 
-如果某次运行改错了文件（比如 v2.6 第一次启动的 55 个文件），`tools/restore_from_log.py` 能按日志里的 `Renamed` 记录把文件移回原名。先停掉容器（否则它会立刻再改一遍），再：
+如果某次运行改错了文件（比如 v2.6 第一次启动的 86 个文件），`tools/restore_from_log.py` 能按日志里的 `Renamed` 记录把文件移回原名。先停掉容器（否则它会立刻再改一遍），再：
 
 ```shell
 docker compose run --rm --build orz python3 tools/restore_from_log.py --dry-run
 docker compose run --rm --build orz python3 tools/restore_from_log.py
 ```
 
-只恢复表里那 55 条记录：旧路径已存在、找不到、找到多个时都跳过，绝不覆盖；还会删掉受影响剧里过期的 `.orz/state.json`，以及空的重名季文件夹（比如 refresh 建出来的空 `Season 01`，而剧本身用 `Season 1`）。
+只恢复表里那 86 条记录：旧路径已存在、找不到、找到多个时都跳过，绝不覆盖；还会删掉受影响剧里过期的 `.orz/state.json`，以及空的重名季文件夹（比如 refresh 建出来的空 `Season 01`，而剧本身用 `Season 1`）。
+
+不是剧的文件夹不会被当成剧：Jellyfin 的图片（`landscape.jpg` / `backdrop.jpg` / `logo.png` / `*-thumb.jpg`）、字幕、nfo 文件，以及群晖的 `@eaDir`（里面甚至有以文件名命名的子文件夹，比如 `@eaDir/landscape.jpg/`），都不会触发 TMDB 查询、也不会记 warning；`@eaDir` 根本不监听。季文件夹除了 `Season 01` / `Specials`，`S02` / `S03` 这种短写法也认。
 
 ## 本地开发
 

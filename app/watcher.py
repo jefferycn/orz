@@ -167,6 +167,33 @@ def _has_still_copying(result) -> bool:
         "still copying" in p.get("reason", "") for p in result.pending)
 
 
+# A folder name that can never be a show: Jellyfin artwork
+# (landscape.jpg / backdrop.jpg / logo.png), episode thumbnails
+# (*-thumb.jpg), Synology's @eaDir/<file>/ thumbnail directories,
+# subtitles, nfo files.  The event watcher treats any unknown
+# directory as a possible show, so without this guard every one of
+# these gets a "No TMDB match" warning — and a wasted TMDB query —
+# every few seconds while Synology regenerates thumbnails.
+_SHOW_NAME_SKIP_EXTS = {
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff",
+    "mkv", "mp4", "avi", "mov", "wmv", "flv", "webm", "m2ts", "ts",
+    "srt", "ass", "ssa", "sub", "vtt",
+    "nfo", "txt", "md", "json", "xml",
+}
+
+
+def _looks_like_show_dir(name: str) -> bool:
+    """Could this folder name be a show folder (``Title (year)``)?"""
+    base = name.strip()
+    if not base or base.startswith((".", "@")):
+        return False
+    if "." in base:
+        ext = base.rsplit(".", 1)[-1].lower()
+        if ext in _SHOW_NAME_SKIP_EXTS:
+            return False
+    return True
+
+
 def create_show(show_dir: str, client: TmdbClient, dry_run: bool = False) -> bool:
     """TMDB lookup for a new show folder.
 
@@ -174,7 +201,13 @@ def create_show(show_dir: str, client: TmdbClient, dry_run: bool = False) -> boo
     cache (``.orz/episodes.json``).  This is one of the only two places
     that talks to TMDB (the other is ``refresh_show``).
     """
-    title, year = parse_folder_name(os.path.basename(show_dir.rstrip("/")))
+    name = os.path.basename(show_dir.rstrip("/"))
+    if not _looks_like_show_dir(name):
+        # Not a show (Jellyfin artwork, a thumbnail, @eaDir, ...):
+        # say so at debug level and never call TMDB for it.
+        log.debug("Ignoring %s: not a show folder", show_dir)
+        return False
+    title, year = parse_folder_name(name)
     if not title or title.startswith("."):
         log.info("Ignoring %s: no title", show_dir)
         return False
@@ -397,7 +430,7 @@ class Watcher:
                 log.warning("Watch root missing: %s", root)
                 continue
             for show_name in sorted(os.listdir(root)):
-                if show_name.startswith("."):
+                if show_name.startswith((".", "@")):
                     continue
                 show_dir = os.path.join(root, show_name)
                 if not os.path.isdir(show_dir):
@@ -508,12 +541,18 @@ class EventWatcher:
         self._path_to_wd[path] = wd
 
     def _add_watch_recursive(self, path: str) -> None:
-        if os.path.basename(path.rstrip("/")) == ".orz":
+        base = os.path.basename(path.rstrip("/"))
+        if base == ".orz" or base.startswith((".", "@")):
             return
         for dirpath, dirnames, _filenames in os.walk(path):
             # .orz holds state.json, written by the renamer itself;
             # watching it would only re-trigger on our own writes.
-            dirnames[:] = [d for d in dirnames if d != ".orz"]
+            # @eaDir is Synology's thumbnail cache (it even holds
+            # directories named after files, e.g. @eaDir/landscape.jpg/):
+            # watching it turns every thumbnail write into a
+            # "No TMDB match" warning for a jpg name.
+            dirnames[:] = [d for d in dirnames
+                           if d != ".orz" and not d.startswith((".", "@"))]
             self._add_watch(dirpath)
 
     def _remove_watch(self, path: str) -> None:
