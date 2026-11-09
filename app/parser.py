@@ -135,6 +135,27 @@ def _strip_show_prefix(name: str, show_title: str | None) -> str:
     return name
 
 
+def _bracketed_number(name: str) -> int | None:
+    """Episode number written as ``[01]`` / ``(01)``.
+
+    Fansub releases often put the episode in brackets, e.g.
+    ``[DBD-Raws][Medalist][01][1080P]...`` or
+    ``...[BDRip][01](A85E5FC2).cht.ass``.  Bracket groups are stripped
+    before parsing, so this must run *first* on the raw stem.
+    Returns the number only when exactly one distinct candidate
+    remains; ``[1080P]`` / ``[2024]`` are not pure-digit groups and
+    never match, and a lone ``1080``/``720``/``2160`` is noise.
+    """
+    candidates = []
+    for m in re.finditer(r"\[(\d{1,3})\]|\((\d{1,3})\)", name):
+        n = int(m.group(1) or m.group(2))
+        if n in {1080, 720, 2160, 480, 576} or n == 0:
+            continue
+        candidates.append(n)
+    distinct = set(candidates)
+    return distinct.pop() if len(distinct) == 1 else None
+
+
 def _strip_brackets(name: str) -> str:
     """Remove ``[...]`` release-group / tag groups entirely.
 
@@ -163,6 +184,8 @@ def _clean(name: str, show_title: str | None) -> str:
     """
     name = _strip_brackets(name)
     name = _strip_show_prefix(name, show_title)
+    # CRC checksum in parentheses, e.g. (A85E5FC2) — 8 hex chars, noise.
+    name = re.sub(r"\([0-9A-Fa-f]{8}\)", " ", name)
     name = _NOISE_RE.sub(" ", name)
     name = _YEAR_RE.sub(" ", name)
     # Lone resolution-ish numbers that survived as ``1080`` / ``720``
@@ -178,6 +201,9 @@ def parse_episode(filename: str, show_title: str | None = None) -> EpisodeGuess:
     Anything ambiguous returns ``episode=None`` — never a 01 fallback.
     """
     stem = strip_lang_suffix(filename)
+    # Bracketed episode first (see _bracketed_number): [01] is stripped
+    # by _clean, so remember it before cleaning.
+    bracket_ep = _bracketed_number(stem)
     cleaned = _clean(stem, show_title)
 
     # 1. SxxEyy / Sxx Eyy / 2x05 / 第x季第y集 / Season x Episode y
@@ -227,6 +253,13 @@ def parse_episode(filename: str, show_title: str | None = None) -> EpisodeGuess:
     m = re.search(r"第\s*(\d{1,3})\s*[集话話]", cleaned)
     if m:
         return EpisodeGuess(int(m.group(1)), season, "high", "第x集")
+
+    # 2b. Bracketed episode [01] — remembered before _clean stripped
+    # it.  Runs before the bare-number step so "[Medalist][01]"
+    # (nothing left after stripping) still finds its episode, and
+    # so a CRC like (A85E5FC2) cannot be mistaken for a number.
+    if bracket_ep is not None:
+        return EpisodeGuess(bracket_ep, season, "medium", "bracket [NN]")
 
     # 3. Bare number: exactly one standalone number may remain.
     # After stripping, tokens are space-separated; a token that is

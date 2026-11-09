@@ -169,5 +169,66 @@ class TestAoNoHakoScreenshot(unittest.TestCase):
         self.assertEqual(r.renamed[0][1], "青之箱 - S01E30 - S2E5.mp4")
 
 
+class TestFansubBatches(unittest.TestCase):
+    """三批实测文件名：ReLIFE 完結編、Medalist、Gundam Unicorn 字幕。"""
+
+    def _run_show(self, show_title, folder, seasons, files):
+        tmp = tempfile.mkdtemp()
+        show_dir = os.path.join(tmp, "Anime", folder)
+        season = os.path.join(show_dir, "Season 01")
+        os.makedirs(season)
+        for name, data in files.items():
+            with open(os.path.join(season, name), "wb") as f:
+                f.write(data)
+        r = rename_season_folder(season, show_title, show_dir,
+                                 EpisodeMapper(seasons))
+        return r, season
+
+    def test_relife_final_arc_14_to_17(self):
+        # TMDB S1 共 17 集：13 集 TV + 4 集完結編（14-17）。
+        titles = {**{i: f"第{i}集" for i in range(1, 14)},
+                  14: "Final Arc: Part 1 - Seed",
+                  15: "Final Arc: Part 2 - Need",
+                  16: "Final Arc: Part 3 - Date",
+                  17: "Final Arc: Part 4 - Life"}
+        files = {f"ReLIFE - S01E{ep:02d} - {titles[ep]}.mkv": f"old-{ep}".encode()
+                 for ep in range(1, 14)}
+        for n in (14, 15, 16, 17):
+            files[f"[Snow-Raws] ReLIFE 完結編 第{n}話 "
+                  f"(BD 1920x1080 HEVC-YUV420P10 FLAC).mkv"] = f"new-{n}".encode()
+        r, _ = self._run_show("ReLIFE", "ReLIFE (2016)", {1: titles}, files)
+        self.assertEqual(r.pending, [])
+        self.assertEqual([n for _, n in r.renamed], [
+            f"ReLIFE - S01E{n:02d} - {titles[n]}.mkv" for n in (14, 15, 16, 17)])
+
+    def test_medalist_bracket_episodes(self):
+        titles = {i: f"第{i}集" for i in range(1, 14)}
+        files = {f"[DBD-Raws][Medalist][0{n}][1080P][BDRip][HEVC-10bit][FLAC].mkv":
+                 f"m{n}".encode() for n in range(1, 6)}
+        r, _ = self._run_show("Medalist", "Medalist (2025)", {1: titles}, files)
+        self.assertEqual(r.pending, [])
+        self.assertEqual([n for _, n in r.renamed], [
+            f"Medalist - S01E{n:02d} - 第{n}集.mkv" for n in range(1, 6)])
+
+    def test_gundam_unicorn_subtitles_only(self):
+        titles = {1: "Day of the Unicorn", 2: "The Red Comet",
+                  3: "The Ghost of Laplace",
+                  4: "At the Bottom of the Gravity Well",
+                  5: "The Black Unicorn",
+                  6: "Two Worlds, Two Tomorrows", 7: "Over the Rainbow"}
+        crcs = ["A85E5FC2", "56E3B7D1", "38E6824E", "A8FE087F",
+                "EBC87C11", "A4208CAA", "F679FB7B"]
+        files = {f"[POPGO][Mobile_Suit_Gundam_Unicorn][HEVC_10bit_AACx4]"
+                 f"[1080P][BDRip][0{n}]({crcs[n-1]}).cht.ass": f"g{n}".encode()
+                 for n in range(1, 8)}
+        r, _ = self._run_show("Mobile Suit Gundam Unicorn",
+                              "Mobile Suit Gundam Unicorn (2010)",
+                              {1: titles}, files)
+        self.assertEqual(r.pending, [])
+        self.assertEqual([n for _, n in r.renamed], [
+            f"Mobile Suit Gundam Unicorn - S01E{n:02d} - {titles[n]}.cht.ass"
+            for n in range(1, 8)])
+
+
 if __name__ == "__main__":
     unittest.main()

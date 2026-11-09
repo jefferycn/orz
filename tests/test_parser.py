@@ -64,6 +64,31 @@ class TestParser(unittest.TestCase):
         g = parse_episode("Show Season 2 Episode 5.mkv", "Show")
         self.assertEqual((g.episode, g.season), (5, 2))
 
+    def test_bracketed_episode_number(self):
+        # 字幕组常把集数写在方括号里：[01] 在 _clean 剥方括号时
+        # 会被一起剥掉，所以必须在剥之前先提取。以前这几类全是
+        # "no number found"，只能靠补位猜，单集先到就猜错。
+        g = parse_episode(
+            "[DBD-Raws][Medalist][01][1080P][BDRip][HEVC-10bit][FLAC].mkv",
+            "Medalist")
+        self.assertEqual(g.episode, 1)
+        g = parse_episode(
+            "[DBD-Raws][Medalist][05][1080P][BDRip][HEVC-10bit][FLAC].mkv",
+            "Medalist")
+        self.assertEqual(g.episode, 5)
+        # 字幕：[01] 是集数，(A85E5FC2) 是 CRC 校验码，不是集数。
+        g = parse_episode(
+            "[POPGO][Mobile_Suit_Gundam_Unicorn][HEVC_10bit_AACx4][1080P]"
+            "[BDRip][01](A85E5FC2).cht.ass", "Mobile Suit Gundam Unicorn")
+        self.assertEqual(g.episode, 1)
+        g = parse_episode(
+            "[POPGO][Mobile_Suit_Gundam_Unicorn][HEVC_10bit_AACx4][1080P]"
+            "[BDRip][07](F679FB7B).cht.ass", "Mobile Suit Gundam Unicorn")
+        self.assertEqual(g.episode, 7)
+        # [1080P] 不是纯数字组，不会被当成集数。
+        g = parse_episode("[Group] Show [1080P] - 03.mkv", "Show")
+        self.assertEqual(g.episode, 3)
+
     def test_digit_named_show(self):
         # Show "24": the 24 is the show, 05 is the episode.
         self.assertEqual(parse_episode("24 - 05.mkv", "24").episode, 5)
