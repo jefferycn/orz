@@ -31,6 +31,20 @@ docker compose up -d --build
 
 `tvshow.nfo` 里的 TMDB 编号，orz 认三种写法：`<tmdbid>`（orz 和旧版 PHP 写的）、`<tmdb>` 和 `<uniqueid type="tmdb">`（Jellyfin/Kodi 写的）。如果 nfo 里完全没有 TMDB 编号（比如只有 TVDB 的 `<id>`），文件就算存在也读不出来：日志会报一条 warning（每小时每部剧只报一次，不会每个季文件夹、每轮都刷），说清原因并让你对这部剧跑一次 `orz refresh` 重建 nfo——不会擅自覆盖你原来的 nfo。
 
+## 手动模式（ORZ_MANUAL_MODE=1）
+
+默认是自动：文件一放进季文件夹，5 秒后就改名。手动模式下 watcher 只看不写：不改名、不把 `Season 1` 改成 `Season 01`、不给新剧建 nfo、不调 TMDB、不写缓存和快照。哪个季文件夹有文件在等，它就在日志里说一声（同一个等待集合只说一次，新文件来了才再说），并告诉你该跑哪条命令：
+
+```shell
+docker exec orz python3 orz.py create "/media/TV show/新剧 (2026)"   # 新剧，还没有 tvshow.nfo
+docker exec orz python3 orz.py refresh "/media/TV show/某剧 (2020)"  # 取集缓存 / 重建 nfo
+docker exec orz python3 orz.py folder "/media/TV show/某剧 (2020)/Season 01"  # 改这一季（脱机）
+```
+
+开法：`.env` 里加 `ORZ_MANUAL_MODE=1`，重启容器。关掉就恢复自动——之前在手动模式下等的那些文件，因为没记快照，重启后第一次扫描就会处理。
+
+另外说明一下“轮询”：定时全量复扫从 v2.5.1 起默认就是关的（`ORZ_RESCAN_INTERVAL=0`），平时没有任何定时扫描；你之前看到的重复日志是启动补扫 + 文件夹改名触发的两次处理。v2.7.7 起，改文件夹名只产生一次处理（以前改名会把父目录也标成脏，触发一次多余的全量扫描）。
+
 ## 命令行只是测试和排错用
 
 ```shell

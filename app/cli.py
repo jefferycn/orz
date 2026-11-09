@@ -21,7 +21,8 @@ Commands:
 
 Environment:
     TMDB_API_KEY       required for create / refresh / scan / watch
-                       (NOT needed for folder / dry-run: offline)
+                       (NOT needed for folder / dry-run: offline,
+                       and NOT needed for watch in manual mode)
     TMDB_LANGUAGE      default zh-CN
     ORZ_WATCH_DIRS     comma-separated roots, default /media/anime,/media/tv-series
     ORZ_WATCH_MODE     inotify (default) or poll
@@ -29,6 +30,10 @@ Environment:
     ORZ_CACHE_DIR      TMDB HTTP response cache, default ./var/cache
     ORZ_SCAN_INTERVAL  poll-mode interval seconds, default 30
     ORZ_STABLE_SECONDS file size/mtime unchanged window, default 5
+    ORZ_MANUAL_MODE    1: the watcher only logs what is waiting and
+                       never renames, creates or normalises anything;
+                       renames happen only via the folder / refresh /
+                       create commands below.  Default 0 (auto).
 """
 from __future__ import annotations
 
@@ -56,6 +61,13 @@ HELP = """Usage: orz <command> [arguments]
 
 Normal use: no commands. Start the container and it watches
 /media/anime and /media/tv-series on its own.
+
+Manual mode (ORZ_MANUAL_MODE=1): the watcher only logs what is
+waiting and never renames anything on its own.  Trigger renames
+yourself:
+  orz create <show-folder>    (new show, no tvshow.nfo yet)
+  orz refresh <show-folder>   (fetch episode cache / rebuild nfo)
+  orz folder <season-folder>  (rename one season, offline)
 """
 
 
@@ -84,19 +96,23 @@ def _folder_command(season_dir: str, dry_run: bool) -> int:
 
 def _watcher(dry_run: bool = False):
     mode = os.environ.get("ORZ_WATCH_MODE", "inotify").lower()
+    manual = os.environ.get("ORZ_MANUAL_MODE", "").lower() in (
+        "1", "true", "yes")
+    # Manual mode never calls TMDB, so it needs no API key.
+    client = None if manual else _client()
     if mode == "poll":
         return Watcher(
-            _client(), _roots(),
+            client, _roots(),
             interval=int(os.environ.get("ORZ_SCAN_INTERVAL", "30")),
             stable_seconds=float(os.environ.get("ORZ_STABLE_SECONDS", "5")),
-            dry_run=dry_run,
+            dry_run=dry_run, manual=manual,
         )
     return EventWatcher(
-        _client(), _roots(),
+        client, _roots(),
         stable_seconds=float(os.environ.get("ORZ_STABLE_SECONDS", "5")),
         rescan_interval=float(os.environ.get(
             "ORZ_RESCAN_INTERVAL", str(DEFAULT_RESCAN_INTERVAL))),
-        dry_run=dry_run,
+        dry_run=dry_run, manual=manual,
     )
 
 

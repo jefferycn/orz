@@ -50,6 +50,14 @@ How it works
   hourly rescan back on.  The rescan is the only periodic
   directory read; normal operation reads nothing until an event
   arrives.
+* Manual mode (``ORZ_MANUAL_MODE=1``): the watcher keeps
+  watching and logging, but writes nothing — no renames, no
+  season-folder normalising, no new-show creation, no TMDB
+  calls, no cache or snapshot writes.  A season folder with
+  files waiting gets one log line (repeated only when the
+  waiting set changes) naming the manual command to run.
+  Renames happen only through the CLI (``folder`` / ``refresh``
+  / ``create``), which manual mode does not affect.
 
 De-duplication: processing is single-threaded, already-renamed
 files are skipped by name, and the renamer's ``.orz/state.json``
@@ -100,6 +108,13 @@ _LAST_LAZY_REFRESH: dict[str, float] = {}
 # once an hour per show, not once per season folder per pass.
 _BAD_NFO_THROTTLE = 3600  # seconds
 _BAD_NFO_LAST_LOG: dict[str, float] = {}
+
+# Manual mode (ORZ_MANUAL_MODE=1): the watcher only logs what is
+# waiting, never writes.  A season folder's waiting set is logged
+# only when it changes, so a folder rename (one MOVED_TO event)
+# produces one line, not one per pass.
+_MANUAL_WAITING: dict[str, tuple] = {}
+_MANUAL_NEW_SHOWN: set[str] = set()
 
 
 def _snapshot(path: str) -> tuple | None:
@@ -170,6 +185,67 @@ def _snapshot_unchanged(show_dir: str, season_dir: str) -> bool:
 def _has_still_copying(result) -> bool:
     return result is not None and any(
         "still copying" in p.get("reason", "") for p in result.pending)
+
+
+def _waiting_files(season_dir: str, stable_files: set[str] | None) -> list[str]:
+    """Stable files in a season folder that still need renaming.
+
+    Pure reads: the manual-mode "what is waiting" check.  A group
+    counts as waiting when not every file in it is already in the
+    clean ``Title - SxxEyy - ...`` form; only stable files are
+    listed (a file still being written is not waiting yet).
+    """
+    folder_season = season_number_from_folder(
+        os.path.basename(season_dir.rstrip("/")))
+    waiting: list[str] = []
+    for files in group_files(season_dir).values():
+        if all(is_already_named(f, folder_season) for f in files):
+            continue
+        waiting.extend(f for f in files
+                       if stable_files is None or f in stable_files)
+    return sorted(waiting)
+
+
+def _log_manual_waiting(season_dir: str, stable_files: set[str] | None) -> None:
+    """One log line per waiting season folder (manual mode only).
+
+    Logs only when the waiting set changes, so repeated passes
+    over the same files stay silent.  The message names the exact
+    manual command: ``folder`` when the show has a usable nfo,
+    ``refresh`` when its nfo has no TMDB id (the refresh rebuilds
+    nfo + episode cache), ``create`` when there is no nfo at all.
+    """
+    waiting = tuple(_waiting_files(season_dir, stable_files))
+    if waiting == _MANUAL_WAITING.get(season_dir):
+        return
+    if not waiting:
+        _MANUAL_WAITING.pop(season_dir, None)
+        return
+    _MANUAL_WAITING[season_dir] = waiting
+    show_dir = os.path.dirname(season_dir.rstrip("/"))
+    if read_nfo(show_dir) is not None:
+        log.info("Manual mode: %d file(s) waiting in %s — run "
+                 "`orz folder %s` to rename",
+                 len(waiting), season_dir, season_dir)
+    elif os.path.exists(nfo_path(show_dir)):
+        log.info("Manual mode: %d file(s) waiting in %s — its "
+                 "tvshow.nfo has no TMDB id, run `orz refresh %s` "
+                 "first, then `orz folder %s`",
+                 len(waiting), season_dir, show_dir, season_dir)
+    else:
+        log.info("Manual mode: %d file(s) waiting in %s — no "
+                 "tvshow.nfo yet, run `orz create %s` first, then "
+                 "`orz folder %s`",
+                 len(waiting), season_dir, show_dir, season_dir)
+
+
+def _log_manual_new_show(show_dir: str) -> None:
+    """One log line per new show folder (manual mode only)."""
+    if show_dir in _MANUAL_NEW_SHOWN:
+        return
+    _MANUAL_NEW_SHOWN.add(show_dir)
+    log.info("Manual mode: new show %s — run `orz create %s`",
+             show_dir, show_dir)
 
 
 # A folder name that can never be a show: Jellyfin artwork
@@ -407,12 +483,13 @@ class Watcher:
     def __init__(self, client: TmdbClient, roots: list[str] | None = None,
                  interval: int = DEFAULT_INTERVAL,
                  stable_seconds: float = DEFAULT_STABLE_SECONDS,
-                 dry_run: bool = False):
+                 dry_run: bool = False, manual: bool = False):
         self.client = client
         self.roots = roots or DEFAULT_ROOTS
         self.interval = interval
         self.stable_seconds = stable_seconds
         self.dry_run = dry_run
+        self.manual = manual
         self.dir_snaps: dict[str, tuple] = {}
         # path -> (size, mtime_ns, unchanged_since_monotonic)
         self.file_state: dict[str, tuple[int, int, float]] = {}
@@ -485,19 +562,34 @@ class Watcher:
                     # from an event that never fired).
                     old_enough = (time.time() - snap[0] / 1e9
                                   > self.stable_seconds)
-                    if was_stable or old_enough:
+                    if self.manual:
+                        # Manual mode: never create anything on its
+                        # own — say which command to run, once.
+                        _log_manual_new_show(show_dir)
+                    elif was_stable or old_enough:
                         create_show(show_dir, self.client,
                                     dry_run=self.dry_run)
                     continue
                 # Standardise season folder names first (cheap, and
                 # snapshot gating must not skip it: a folder renamed
-                # by hand still needs standardising).
-                normalize_season_folders(show_dir)
+                # by hand still needs standardising).  Skipped in
+                # manual mode: that is a rename, and manual mode
+                # never renames — the `folder` command does it.
+                if not self.manual:
+                    normalize_season_folders(show_dir)
                 for entry in sorted(os.listdir(show_dir)):
                     season_dir = os.path.join(show_dir, entry)
                     if not os.path.isdir(season_dir):
                         continue
                     if season_number_from_folder(entry) is None:
+                        continue
+                    if self.manual:
+                        # Log what is waiting (once per waiting set)
+                        # and nothing else: no rename, no TMDB, no
+                        # snapshot — so flipping back to auto mode
+                        # later still processes these files.
+                        _log_manual_waiting(
+                            season_dir, self._stable_files_in(season_dir))
                         continue
                     s_snap = _snapshot(season_dir)
                     self.dir_snaps[season_dir] = s_snap
@@ -543,12 +635,13 @@ class EventWatcher:
                  roots: list[str] | None = None,
                  stable_seconds: float = DEFAULT_STABLE_SECONDS,
                  rescan_interval: float = DEFAULT_RESCAN_INTERVAL,
-                 dry_run: bool = False):
+                 dry_run: bool = False, manual: bool = False):
         self.client = client
         self.roots = roots or DEFAULT_ROOTS
         self.stable_seconds = stable_seconds
         self.rescan_interval = rescan_interval
         self.dry_run = dry_run
+        self.manual = manual
         self._stop = threading.Event()
         self._inotify = Inotify()  # raises OSError when unavailable
         self._wd_to_path: dict[int, str] = {}
@@ -560,7 +653,7 @@ class EventWatcher:
         # Reuse the polling Watcher for catch-up / rescan scans and
         # for per-file stability checks.
         self._poller = Watcher(client, roots, stable_seconds=stable_seconds,
-                               dry_run=dry_run)
+                               dry_run=dry_run, manual=manual)
 
     # -- watches --------------------------------------------------------
     def _add_watch(self, path: str) -> None:
@@ -626,13 +719,16 @@ class EventWatcher:
             if mask & (IN_CREATE | IN_MOVED_TO):
                 # A whole show folder (with Season 01 inside) moved
                 # in at once: watch every directory in it, not just
-                # the top one.
+                # the top one.  Only the moved dir itself is marked
+                # dirty — marking the parent (a watch root) dirty
+                # too used to trigger a full rescan on every folder
+                # rename, so one rename was processed twice (v2.7.7).
                 self._add_watch_recursive(full)
                 self._mark_dirty(full)
-                self._mark_dirty(path)
             elif mask & (IN_DELETE | IN_MOVED_FROM):
+                # A deleted / moved-away folder needs no processing;
+                # its destination generates its own MOVED_TO.
                 self._remove_watch(full)
-                self._mark_dirty(path)
             return
         # File event: only the directory containing it is processed,
         # and only after it has been quiet for stable_seconds.
@@ -644,13 +740,19 @@ class EventWatcher:
             return
         nfo_path = os.path.join(show_dir, "tvshow.nfo")
         if not os.path.exists(nfo_path):
+            if self.manual:
+                _log_manual_new_show(show_dir)
+                return
             if self.client is None:
                 log.info("No tvshow.nfo in %s and no TMDB client, "
                          "skipping", show_dir)
                 return
             create_show(show_dir, self.client, dry_run=self.dry_run)
             return
-        normalize_season_folders(show_dir)
+        # Manual mode never renames: skip the season-folder
+        # standardising too (the `folder` command does it).
+        if not self.manual:
+            normalize_season_folders(show_dir)
         for entry in sorted(os.listdir(show_dir)):
             if entry == ".orz":
                 continue
@@ -661,6 +763,13 @@ class EventWatcher:
 
     def _process_season_dir(self, season_dir: str) -> None:
         if not os.path.isdir(season_dir):
+            return
+        if self.manual:
+            # Log what is waiting (once per waiting set) and stop:
+            # no rename, no TMDB, no snapshot — flipping back to
+            # auto mode later still processes these files.
+            _log_manual_waiting(
+                season_dir, self._poller._stable_files_in(season_dir))
             return
         if not self.dry_run:
             season_dir = normalize_season_dir(season_dir)
@@ -791,20 +900,23 @@ def scan_once(roots: list[str], client: TmdbClient,
 
 def watch(roots: list[str], client: TmdbClient, interval: int = 30,
           dry_run: bool = False, mode: str = "inotify",
-          rescan_interval: float = DEFAULT_RESCAN_INTERVAL) -> None:
+          rescan_interval: float = DEFAULT_RESCAN_INTERVAL,
+          manual: bool = False) -> None:
     """Default entry point for ``orz watch``.
 
     inotify by default; ``mode="poll"`` (or an inotify failure at
-    startup) falls back to the polling Watcher.
+    startup) falls back to the polling Watcher.  ``manual`` is
+    ORZ_MANUAL_MODE: watch + log only, never rename.
     """
     if mode == "poll":
         Watcher(client, roots, interval=interval,
-                dry_run=dry_run).watch()
+                dry_run=dry_run, manual=manual).watch()
         return
     try:
         EventWatcher(client, roots, dry_run=dry_run,
-                     rescan_interval=rescan_interval).watch()
+                     rescan_interval=rescan_interval,
+                     manual=manual).watch()
     except OSError:
         log.warning("inotify unavailable, falling back to polling")
         Watcher(client, roots, interval=interval,
-                dry_run=dry_run).watch()
+                dry_run=dry_run, manual=manual).watch()
