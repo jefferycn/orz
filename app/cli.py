@@ -1,9 +1,9 @@
-"""CLI — for manual testing and troubleshooting only.
+"""CLI — for manual use and troubleshooting.
 
 Normal operation needs no commands: the Docker image's default
 command is ``watch``, which monitors ``/media/anime`` and
-``/media/tv-series`` with inotify (events only, no polling) in the
-background and renames offline.
+``/media/tv-series`` with inotify (events only, no polling, no
+catch-up scan) in the background and renames offline.
 
 Commands:
     create <show-folder>    TMDB lookup, write tvshow.nfo + season
@@ -16,24 +16,19 @@ Commands:
                             (reads tvshow.nfo + .orz/episodes.json only;
                             no TMDB, no API key needed)
     dry-run <season-folder> Same as folder, but changes nothing
-    scan                    One polling pass over the watch roots
-    watch                   Poll forever (this is what Docker runs)
+    scan                    One manual pass over the watch roots —
+                            catches up files that arrived while the
+                            container was down (the watcher itself
+                            never scans on its own)
+    watch                   Watch for events (this is what Docker runs)
 
 Environment:
     TMDB_API_KEY       required for create / refresh / scan / watch
-                       (NOT needed for folder / dry-run: offline,
-                       and NOT needed for watch in manual mode)
+                       (NOT needed for folder / dry-run: offline)
     TMDB_LANGUAGE      default zh-CN
     ORZ_WATCH_DIRS     comma-separated roots, default /media/anime,/media/tv-series
-    ORZ_WATCH_MODE     inotify (default) or poll
-    ORZ_RESCAN_INTERVAL safety-net full rescan seconds, default 0 (off)
     ORZ_CACHE_DIR      TMDB HTTP response cache, default ./var/cache
-    ORZ_SCAN_INTERVAL  poll-mode interval seconds, default 30
     ORZ_STABLE_SECONDS file size/mtime unchanged window, default 5
-    ORZ_MANUAL_MODE    1: the watcher only logs what is waiting and
-                       never renames, creates or normalises anything;
-                       renames happen only via the folder / refresh /
-                       create commands below.  Default 0 (auto).
 """
 from __future__ import annotations
 
@@ -46,7 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.tmdb import TmdbClient  # noqa: E402
 from app.watcher import (  # noqa: E402
-    DEFAULT_RESCAN_INTERVAL, DEFAULT_ROOTS, EventWatcher, Watcher,
+    DEFAULT_ROOTS, EventWatcher, Watcher,
     create_show, process_season_folder, refresh_show,
 )
 
@@ -56,18 +51,13 @@ HELP = """Usage: orz <command> [arguments]
   orz refresh <show-folder>   Re-fetch a show from TMDB (nfo + episode cache)
   orz folder <season-folder>  Rename files in one Season folder (offline)
   orz dry-run <season-folder> Show what `folder` would rename, change nothing
-  orz scan                    One polling pass over the watch roots
-  orz watch                   Poll forever (the Docker default)
+  orz scan                    One manual pass over the watch roots
+  orz watch                   Watch for events (the Docker default)
 
 Normal use: no commands. Start the container and it watches
-/media/anime and /media/tv-series on its own.
-
-Manual mode (ORZ_MANUAL_MODE=1): the watcher only logs what is
-waiting and never renames anything on its own.  Trigger renames
-yourself:
-  orz create <show-folder>    (new show, no tvshow.nfo yet)
-  orz refresh <show-folder>   (fetch episode cache / rebuild nfo)
-  orz folder <season-folder>  (rename one season, offline)
+/media/anime and /media/tv-series on its own — events only, no
+polling, no catch-up scan.  Files that arrived while the
+container was down are caught up with `orz scan`.
 """
 
 
@@ -95,25 +85,20 @@ def _folder_command(season_dir: str, dry_run: bool) -> int:
 
 
 def _watcher(dry_run: bool = False):
-    mode = os.environ.get("ORZ_WATCH_MODE", "inotify").lower()
-    manual = os.environ.get("ORZ_MANUAL_MODE", "").lower() in (
-        "1", "true", "yes")
-    # Manual mode never calls TMDB, so it needs no API key.
-    client = None if manual else _client()
-    if mode == "poll":
-        return Watcher(
-            client, _roots(),
-            interval=int(os.environ.get("ORZ_SCAN_INTERVAL", "30")),
+    # Events only: if inotify is unavailable the watcher exits
+    # with a clear error instead of silently falling back to
+    # polling (there is no polling mode by design).
+    try:
+        return EventWatcher(
+            _client(), _roots(),
             stable_seconds=float(os.environ.get("ORZ_STABLE_SECONDS", "5")),
-            dry_run=dry_run, manual=manual,
+            dry_run=dry_run,
         )
-    return EventWatcher(
-        client, _roots(),
-        stable_seconds=float(os.environ.get("ORZ_STABLE_SECONDS", "5")),
-        rescan_interval=float(os.environ.get(
-            "ORZ_RESCAN_INTERVAL", str(DEFAULT_RESCAN_INTERVAL))),
-        dry_run=dry_run, manual=manual,
-    )
+    except OSError as e:
+        print(f"Error: inotify unavailable ({e}) — orz watches by "
+              "events only and does not fall back to polling.",
+              file=sys.stderr)
+        sys.exit(1)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -136,7 +121,13 @@ def main(argv: list[str] | None = None) -> int:
         # Two passes: the first records snapshots / file states, the
         # second processes folders that are already stable (so a
         # one-shot `scan` catches up instead of only observing).
-        watcher = _watcher(dry_run="--dry-run" in argv)
+        # This is the only scan in orz, and it only runs when the
+        # user asks for it — the watcher itself never scans.
+        watcher = Watcher(
+            _client(), _roots(),
+            stable_seconds=float(os.environ.get("ORZ_STABLE_SECONDS", "5")),
+            dry_run="--dry-run" in argv,
+        )
         watcher.scan_once()
         watcher.scan_once()
         return 0

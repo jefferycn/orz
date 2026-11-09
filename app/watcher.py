@@ -2,32 +2,29 @@
 
 The container's default command is ``watch``; the CLI commands
 (``create`` / ``folder`` / ``scan`` / ``dry-run`` / ``refresh``) exist
-only for manual testing and troubleshooting.
+only for manual use and troubleshooting.
 
-Why inotify, not polling: polling re-reads every directory every
-30 s whether anything changed or not.  inotify (``app/inotify.py``,
-ctypes on libc, no extra binary) only wakes the process when a
-file or directory actually changes — one event per change, and a
-whole batch dropped in together is processed together once the
-files are stable.  The old PHP ``listen.sh`` used ``inotifywait``
-for the same reason; this is the same kernel mechanism, called
-directly.  Polling (``Watcher``) is kept as a fallback when
-inotify is unavailable (``ORZ_WATCH_MODE=poll``).
+Events only, no polling, no catch-up scan: inotify
+(``app/inotify.py``, ctypes on libc, no extra binary) wakes the
+process only when a file or directory actually changes — one
+event per change, and a whole batch dropped in together is
+processed together once the files are stable.  The old PHP
+``listen.sh`` used ``inotifywait`` for the same reason; this is
+the same kernel mechanism, called directly.  There is no
+periodic scan and no startup scan: a file that arrives while
+the container is down is not processed until a new event
+touches its folder — run ``orz scan`` once to catch those up
+by hand.  If inotify is unavailable the watcher exits with an
+error instead of silently falling back to polling.
 
 How it works
 ------------
-* Startup: one catch-up scan (the polling ``scan_once``), so
-  anything that arrived while the container was down is processed
-  at once — but only directories that *changed* since the last
-  recorded snapshot (``<show>/.orz/snapshots.json``).  A directory
-  with no changes is not opened, not refreshed and not renamed,
-  however many restarts happen.  After every processed directory
-  its new snapshot is recorded, so the next startup skips it.
-  The first run after upgrading has no snapshots and processes
-  everything once (to build the baseline); files already in the
-  clean ``Title - S01E05 - ...`` form are still left alone by the
-  renamer, so that baseline pass renames nothing that was
-  already organised.
+* Startup: watches are added, then the loop waits for events —
+  nothing is scanned.  Files already on disk are not touched
+  until an event (move / create / rename) marks their folder
+  dirty.  After a folder is processed its new snapshot is
+  recorded (``<show>/.orz/snapshots.json``: mtime + file
+  listing), so orz's own rename events do not re-process it.
 * A change event marks only the affected directory dirty; it is
   processed ``stable_seconds`` (default 5 s) after the *last*
   event in it, so a slow copy keeps pushing its deadline back and
@@ -42,22 +39,10 @@ How it works
   is missing (an old show that only has ``tvshow.nfo``), the
   first file event fetches it from TMDB and renaming continues
   in the same pass.  No manual ``refresh``, no bulk job.
-* Safety net: a full rescan only on inotify queue overflow, in
-  case an event was ever missed.  The periodic rescan is off by
-  default (``ORZ_RESCAN_INTERVAL=0``) — files here are moved
-  within the NAS, never slowly copied in, so there is nothing to
-  catch up on; set ``ORZ_RESCAN_INTERVAL=3600`` to turn the
-  hourly rescan back on.  The rescan is the only periodic
-  directory read; normal operation reads nothing until an event
-  arrives.
-* Manual mode (``ORZ_MANUAL_MODE=1``): the watcher keeps
-  watching and logging, but writes nothing — no renames, no
-  season-folder normalising, no new-show creation, no TMDB
-  calls, no cache or snapshot writes.  A season folder with
-  files waiting gets one log line (repeated only when the
-  waiting set changes) naming the manual command to run.
-  Renames happen only through the CLI (``folder`` / ``refresh``
-  / ``create``), which manual mode does not affect.
+* No safety-net scan either: on an inotify queue overflow the
+  watcher only logs a warning (some events may have been lost —
+  run ``orz scan`` once to catch up by hand).  Nothing in the
+  watcher reads a directory unless an event says it changed.
 
 De-duplication: processing is single-threaded, already-renamed
 files are skipped by name, and the renamer's ``.orz/state.json``
@@ -93,9 +78,7 @@ log = logging.getLogger("orz.watcher")
 SNAPSHOT_FILENAME = "snapshots.json"
 
 DEFAULT_ROOTS = ["/media/anime", "/media/tv-series"]
-DEFAULT_INTERVAL = 30        # seconds between scans (polling fallback)
 DEFAULT_STABLE_SECONDS = 5   # file size/mtime unchanged for this long
-DEFAULT_RESCAN_INTERVAL = 0  # safety-net full rescan, seconds (0 = off, default)
 
 # Lazy refresh: when a show has no episode cache, the first file
 # event fetches it from TMDB once.  A failed fetch is not retried
@@ -108,13 +91,6 @@ _LAST_LAZY_REFRESH: dict[str, float] = {}
 # once an hour per show, not once per season folder per pass.
 _BAD_NFO_THROTTLE = 3600  # seconds
 _BAD_NFO_LAST_LOG: dict[str, float] = {}
-
-# Manual mode (ORZ_MANUAL_MODE=1): the watcher only logs what is
-# waiting, never writes.  A season folder's waiting set is logged
-# only when it changes, so a folder rename (one MOVED_TO event)
-# produces one line, not one per pass.
-_MANUAL_WAITING: dict[str, tuple] = {}
-_MANUAL_NEW_SHOWN: set[str] = set()
 
 
 def _snapshot(path: str) -> tuple | None:
@@ -185,67 +161,6 @@ def _snapshot_unchanged(show_dir: str, season_dir: str) -> bool:
 def _has_still_copying(result) -> bool:
     return result is not None and any(
         "still copying" in p.get("reason", "") for p in result.pending)
-
-
-def _waiting_files(season_dir: str, stable_files: set[str] | None) -> list[str]:
-    """Stable files in a season folder that still need renaming.
-
-    Pure reads: the manual-mode "what is waiting" check.  A group
-    counts as waiting when not every file in it is already in the
-    clean ``Title - SxxEyy - ...`` form; only stable files are
-    listed (a file still being written is not waiting yet).
-    """
-    folder_season = season_number_from_folder(
-        os.path.basename(season_dir.rstrip("/")))
-    waiting: list[str] = []
-    for files in group_files(season_dir).values():
-        if all(is_already_named(f, folder_season) for f in files):
-            continue
-        waiting.extend(f for f in files
-                       if stable_files is None or f in stable_files)
-    return sorted(waiting)
-
-
-def _log_manual_waiting(season_dir: str, stable_files: set[str] | None) -> None:
-    """One log line per waiting season folder (manual mode only).
-
-    Logs only when the waiting set changes, so repeated passes
-    over the same files stay silent.  The message names the exact
-    manual command: ``folder`` when the show has a usable nfo,
-    ``refresh`` when its nfo has no TMDB id (the refresh rebuilds
-    nfo + episode cache), ``create`` when there is no nfo at all.
-    """
-    waiting = tuple(_waiting_files(season_dir, stable_files))
-    if waiting == _MANUAL_WAITING.get(season_dir):
-        return
-    if not waiting:
-        _MANUAL_WAITING.pop(season_dir, None)
-        return
-    _MANUAL_WAITING[season_dir] = waiting
-    show_dir = os.path.dirname(season_dir.rstrip("/"))
-    if read_nfo(show_dir) is not None:
-        log.info("Manual mode: %d file(s) waiting in %s — run "
-                 "`orz folder %s` to rename",
-                 len(waiting), season_dir, season_dir)
-    elif os.path.exists(nfo_path(show_dir)):
-        log.info("Manual mode: %d file(s) waiting in %s — its "
-                 "tvshow.nfo has no TMDB id, run `orz refresh %s` "
-                 "first, then `orz folder %s`",
-                 len(waiting), season_dir, show_dir, season_dir)
-    else:
-        log.info("Manual mode: %d file(s) waiting in %s — no "
-                 "tvshow.nfo yet, run `orz create %s` first, then "
-                 "`orz folder %s`",
-                 len(waiting), season_dir, show_dir, season_dir)
-
-
-def _log_manual_new_show(show_dir: str) -> None:
-    """One log line per new show folder (manual mode only)."""
-    if show_dir in _MANUAL_NEW_SHOWN:
-        return
-    _MANUAL_NEW_SHOWN.add(show_dir)
-    log.info("Manual mode: new show %s — run `orz create %s`",
-             show_dir, show_dir)
 
 
 # A folder name that can never be a show: Jellyfin artwork
@@ -481,15 +396,12 @@ class Watcher:
     """Stateful polling loop: directory snapshots + per-file stability."""
 
     def __init__(self, client: TmdbClient, roots: list[str] | None = None,
-                 interval: int = DEFAULT_INTERVAL,
                  stable_seconds: float = DEFAULT_STABLE_SECONDS,
-                 dry_run: bool = False, manual: bool = False):
+                 dry_run: bool = False):
         self.client = client
         self.roots = roots or DEFAULT_ROOTS
-        self.interval = interval
         self.stable_seconds = stable_seconds
         self.dry_run = dry_run
-        self.manual = manual
         self.dir_snaps: dict[str, tuple] = {}
         # path -> (size, mtime_ns, unchanged_since_monotonic)
         self.file_state: dict[str, tuple[int, int, float]] = {}
@@ -562,34 +474,19 @@ class Watcher:
                     # from an event that never fired).
                     old_enough = (time.time() - snap[0] / 1e9
                                   > self.stable_seconds)
-                    if self.manual:
-                        # Manual mode: never create anything on its
-                        # own — say which command to run, once.
-                        _log_manual_new_show(show_dir)
-                    elif was_stable or old_enough:
+                    if was_stable or old_enough:
                         create_show(show_dir, self.client,
                                     dry_run=self.dry_run)
                     continue
                 # Standardise season folder names first (cheap, and
                 # snapshot gating must not skip it: a folder renamed
-                # by hand still needs standardising).  Skipped in
-                # manual mode: that is a rename, and manual mode
-                # never renames — the `folder` command does it.
-                if not self.manual:
-                    normalize_season_folders(show_dir)
+                # by hand still needs standardising).
+                normalize_season_folders(show_dir)
                 for entry in sorted(os.listdir(show_dir)):
                     season_dir = os.path.join(show_dir, entry)
                     if not os.path.isdir(season_dir):
                         continue
                     if season_number_from_folder(entry) is None:
-                        continue
-                    if self.manual:
-                        # Log what is waiting (once per waiting set)
-                        # and nothing else: no rename, no TMDB, no
-                        # snapshot — so flipping back to auto mode
-                        # later still processes these files.
-                        _log_manual_waiting(
-                            season_dir, self._stable_files_in(season_dir))
                         continue
                     s_snap = _snapshot(season_dir)
                     self.dir_snaps[season_dir] = s_snap
@@ -609,22 +506,10 @@ class Watcher:
                     if result is not None and not _has_still_copying(result):
                         _record_snapshot(show_dir, season_dir)
 
-    def watch(self) -> None:
-        """Poll forever.  The first scan is a catch-up scan (see module docstring)."""
-        log.info("Watching %s every %ss (files stable after %ss)",
-                 ", ".join(self.roots), self.interval, self.stable_seconds)
-        while True:
-            try:
-                self.scan_once()
-            except Exception:
-                log.exception("Scan failed, retrying next round")
-            time.sleep(self.interval)
-
-
-# -- backwards-compatible module functions (used by the CLI) -----------
+# -- event-driven watcher (the Docker default) ---------------------------
 
 class EventWatcher:
-    """Event-driven watcher: inotify + debounce, polling only as safety net.
+    """Event-driven watcher: inotify + debounce, no scans.
 
     ``client`` is only used to create a new show (TMDB lookup); pass
     None when the watched tree already has ``tvshow.nfo`` files and
@@ -634,26 +519,21 @@ class EventWatcher:
     def __init__(self, client: TmdbClient | None = None,
                  roots: list[str] | None = None,
                  stable_seconds: float = DEFAULT_STABLE_SECONDS,
-                 rescan_interval: float = DEFAULT_RESCAN_INTERVAL,
-                 dry_run: bool = False, manual: bool = False):
+                 dry_run: bool = False):
         self.client = client
         self.roots = roots or DEFAULT_ROOTS
         self.stable_seconds = stable_seconds
-        self.rescan_interval = rescan_interval
         self.dry_run = dry_run
-        self.manual = manual
         self._stop = threading.Event()
         self._inotify = Inotify()  # raises OSError when unavailable
         self._wd_to_path: dict[int, str] = {}
         self._path_to_wd: dict[str, int] = {}
         # path -> monotonic time when it may be processed
         self._dirty: dict[str, float] = {}
-        self._next_rescan = (time.monotonic() + rescan_interval
-                             if rescan_interval > 0 else None)
-        # Reuse the polling Watcher for catch-up / rescan scans and
-        # for per-file stability checks.
+        # Reuse the Watcher for per-file stability checks (and for
+        # the manual one-shot `scan` command).
         self._poller = Watcher(client, roots, stable_seconds=stable_seconds,
-                               dry_run=dry_run, manual=manual)
+                               dry_run=dry_run)
 
     # -- watches --------------------------------------------------------
     def _add_watch(self, path: str) -> None:
@@ -705,8 +585,11 @@ class EventWatcher:
         if os.path.basename(path.rstrip("/")) == ".orz" or name == ".orz":
             return
         if mask & IN_Q_OVERFLOW:
-            log.warning("inotify queue overflow, doing a full rescan")
-            self._rescan()
+            # Events were dropped: no automatic rescan (events
+            # only, by design) — say so, so the user can run
+            # `orz scan` once if anything looks unrenamed.
+            log.warning("inotify queue overflow: some events were "
+                        "lost, run `orz scan` once to catch up")
             return
         if mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF):
             self._remove_watch(path)
@@ -740,19 +623,13 @@ class EventWatcher:
             return
         nfo_path = os.path.join(show_dir, "tvshow.nfo")
         if not os.path.exists(nfo_path):
-            if self.manual:
-                _log_manual_new_show(show_dir)
-                return
             if self.client is None:
                 log.info("No tvshow.nfo in %s and no TMDB client, "
                          "skipping", show_dir)
                 return
             create_show(show_dir, self.client, dry_run=self.dry_run)
             return
-        # Manual mode never renames: skip the season-folder
-        # standardising too (the `folder` command does it).
-        if not self.manual:
-            normalize_season_folders(show_dir)
+        normalize_season_folders(show_dir)
         for entry in sorted(os.listdir(show_dir)):
             if entry == ".orz":
                 continue
@@ -763,13 +640,6 @@ class EventWatcher:
 
     def _process_season_dir(self, season_dir: str) -> None:
         if not os.path.isdir(season_dir):
-            return
-        if self.manual:
-            # Log what is waiting (once per waiting set) and stop:
-            # no rename, no TMDB, no snapshot — flipping back to
-            # auto mode later still processes these files.
-            _log_manual_waiting(
-                season_dir, self._poller._stable_files_in(season_dir))
             return
         if not self.dry_run:
             season_dir = normalize_season_dir(season_dir)
@@ -802,7 +672,10 @@ class EventWatcher:
                 continue
             try:
                 if path in self.roots:
-                    self._rescan()
+                    # A loose file directly in a watch root: orz
+                    # ignores it (only show folders are processed),
+                    # and a root never triggers a rescan.
+                    continue
                 elif season_number_from_folder(
                         os.path.basename(path.rstrip("/"))) is not None:
                     self._process_season_dir(path)
@@ -814,32 +687,16 @@ class EventWatcher:
             except Exception:
                 log.exception("Failed processing %s", path)
 
-    def _rescan(self) -> None:
-        """Full scan + re-sync watches (startup, overflow, safety net)."""
-        try:
-            self._poller.scan_once()
-        except Exception:
-            log.exception("Rescan failed")
-        for root in self.roots:
-            self._add_watch_recursive(root)
-        if self.rescan_interval > 0:
-            self._next_rescan = time.monotonic() + self.rescan_interval
-
     # -- main loop ------------------------------------------------------
     def start(self) -> None:
-        log.info("Watching %s (inotify, files stable after %ss, "
-                 "safety rescan %s)",
-                 ", ".join(self.roots), self.stable_seconds,
-                 f"every {self.rescan_interval}s"
-                 if self.rescan_interval else "off")
-        # Watches first, catch-up scan second: a file that arrives
-        # after the watches are on generates an event, and a file
-        # that was already there is picked up by the scan.  The
-        # other order leaves a window where a new file is seen by
-        # neither.
+        log.info("Watching %s (inotify, files stable after %ss)",
+                 ", ".join(self.roots), self.stable_seconds)
+        # Watches only — no startup scan, by design: files already
+        # on disk are not touched until an event marks their
+        # folder dirty.  (Run `orz scan` once to catch up files
+        # that arrived while the container was down.)
         for root in self.roots:
             self._add_watch_recursive(root)
-        self._rescan()  # startup catch-up scan
 
     def run_once(self, timeout: float | None = None) -> None:
         """Wait for events (at most ``timeout``), then process due dirs."""
@@ -847,8 +704,6 @@ class EventWatcher:
         waits = []
         if self._dirty:
             waits.append(max(0.0, min(self._dirty.values()) - now))
-        if self._next_rescan is not None:
-            waits.append(max(0.0, self._next_rescan - now))
         wait = min(waits) if waits else 1.0
         if timeout is not None:
             wait = min(wait, timeout)
@@ -867,10 +722,6 @@ class EventWatcher:
                 if not self._stop.is_set():
                     log.exception("Failed reading inotify events")
         self._process_dirty()
-        if (self._next_rescan is not None
-                and time.monotonic() >= self._next_rescan):
-            log.info("Safety rescan")
-            self._rescan()
 
     def watch(self) -> None:
         self.start()
@@ -898,25 +749,12 @@ def scan_once(roots: list[str], client: TmdbClient,
     return watcher.dir_snaps
 
 
-def watch(roots: list[str], client: TmdbClient, interval: int = 30,
-          dry_run: bool = False, mode: str = "inotify",
-          rescan_interval: float = DEFAULT_RESCAN_INTERVAL,
-          manual: bool = False) -> None:
-    """Default entry point for ``orz watch``.
+def watch(roots: list[str], client: TmdbClient,
+          dry_run: bool = False) -> None:
+    """Default entry point for ``orz watch`` (inotify only).
 
-    inotify by default; ``mode="poll"`` (or an inotify failure at
-    startup) falls back to the polling Watcher.  ``manual`` is
-    ORZ_MANUAL_MODE: watch + log only, never rename.
+    Raises OSError when inotify is unavailable: there is no
+    polling fallback by design — polling would rename files
+    on a timer instead of on events.
     """
-    if mode == "poll":
-        Watcher(client, roots, interval=interval,
-                dry_run=dry_run, manual=manual).watch()
-        return
-    try:
-        EventWatcher(client, roots, dry_run=dry_run,
-                     rescan_interval=rescan_interval,
-                     manual=manual).watch()
-    except OSError:
-        log.warning("inotify unavailable, falling back to polling")
-        Watcher(client, roots, interval=interval,
-                dry_run=dry_run, manual=manual).watch()
+    EventWatcher(client, roots, dry_run=dry_run).watch()

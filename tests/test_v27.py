@@ -270,7 +270,7 @@ class TestSnapshotGating(unittest.TestCase):
 
         watcher_module.process_season_folder = counting
         try:
-            w = Watcher(None, [root], interval=30, stable_seconds=0)
+            w = Watcher(None, [root], stable_seconds=0)
             w.scan_once()
             self.assertEqual(len(calls), 1)
             self.assertTrue(os.path.exists(

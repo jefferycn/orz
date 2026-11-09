@@ -65,8 +65,7 @@ def _make_show(root, show="Show (2024)", titles=None):
 class TestEventWatcher(unittest.TestCase):
     def _run_watcher(self, root, stable_seconds=0.3):
         w = EventWatcher(client=None, roots=[root],
-                         stable_seconds=stable_seconds,
-                         rescan_interval=0)
+                         stable_seconds=stable_seconds)
         t = threading.Thread(target=w.watch, daemon=True)
         t.start()
         # Wait until the watches are on: a file written before the

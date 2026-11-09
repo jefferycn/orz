@@ -25,25 +25,11 @@ docker compose up -d --build
 - TMDB 没有某部剧的 zh-CN 译名时，`name` 会回落到原名 / 英文，改名结果就是原名 / 英文，不是文件夹名。
 3. 改名**脱机完成**：只读本地 `tvshow.nfo` + `.orz/episodes.json`，每次改名**不调 TMDB**。TMDB 只在新建剧集（`create`）、刷新（`refresh`）时调一次，没网也能改名。旧版 PHP 留下的剧只有 nfo、没有集缓存：第一次有文件放进它的季文件夹时，程序会去 TMDB 取一次缓存、同一轮就把文件改了，不用手动 `refresh`；取不到（文件夹名跟 TMDB 对不上）就记 warning、文件不动，10 分钟内不再重试。
 
-启动时先加 watch 再扫一遍补漏：容器停机期间移入的文件，只要大小已稳定，第一次扫描就处理；启动后才到的文件会触发事件，不会漏。**补扫只处理自上次记录以来有改动的目录**：每个季文件夹的快照（修改时间 + 文件列表）存在本剧 `.orz/snapshots.json` 里，没改动的目录启动时直接跳过，不打开、不刷新、不改名——只有季文件夹改名标准化（`Season 1` → `Season 01`）是每次扫描都跑的，它只看文件夹名、不读文件。安全网默认是关的（全量复扫 `ORZ_RESCAN_INTERVAL=0`），只在 inotify 队列溢出时复扫一次；想开每小时复扫就设 `ORZ_RESCAN_INTERVAL=3600`。inotify 不可用时自动回落到轮询（`ORZ_WATCH_MODE=poll`）。
+没有轮询，没有补扫：启动时只加 watch，不扫描。文件放进季文件夹会触发 inotify 事件，5 秒稳定后改名；容器停机期间移入的文件不会被处理——直到有新事件碰到它那个文件夹，或者你手动跑一次 `orz scan` 补上（`scan` 是唯一的扫描，只在你敲命令时跑）。每个季文件夹的快照（修改时间 + 文件列表）存在本剧 `.orz/snapshots.json` 里：处理完一个文件夹就记一笔，orz 自己改名产生的事件再来时，快照没变就直接跳过，不会重复处理。inotify 队列溢出时也只记一条 warning（可能丢了几个事件，跑一次 `orz scan` 补上），不自动扫。
 
 已经是干净的 `剧名 - SxxEyy - 集名` 形式的文件一律不动：`Dragon Ball - S02E15 - ...` 放在 `Season 2` 里、orz 自己改过的 `绝望主妇 - S04E01 - ...`，都算已经整理好。只带集数标记但不是这个形式的，仍要改名：`Attack on Titan S01E01.mkv`、`A Sister's All You Need. E01 ...`、以及发布组文件名 `Desperate.Housewives.S04E01.1080p.WEB-DL...ass`（点号分隔、带编码和发布组标签的是下载名，不是资料库名），都会改成中文格式。文件名里没有明确集数标记的文件也是要改的（比如 `[Group] Show - 05.mkv`）。季标记和文件夹季号不一致的文件仍会处理（比如 `Season 2 - 05` 放在 `Season 01` 里）。集号只属于视频：字幕不占集号，后到的字幕即使视频已经改好名了也会跟着改；同集的两个视频才算冲突。
 
 `tvshow.nfo` 里的 TMDB 编号，orz 认三种写法：`<tmdbid>`（orz 和旧版 PHP 写的）、`<tmdb>` 和 `<uniqueid type="tmdb">`（Jellyfin/Kodi 写的）。如果 nfo 里完全没有 TMDB 编号（比如只有 TVDB 的 `<id>`），文件就算存在也读不出来：日志会报一条 warning（每小时每部剧只报一次，不会每个季文件夹、每轮都刷），说清原因并让你对这部剧跑一次 `orz refresh` 重建 nfo——不会擅自覆盖你原来的 nfo。
-
-## 手动模式（ORZ_MANUAL_MODE=1）
-
-默认是自动：文件一放进季文件夹，5 秒后就改名。手动模式下 watcher 只看不写：不改名、不把 `Season 1` 改成 `Season 01`、不给新剧建 nfo、不调 TMDB、不写缓存和快照。哪个季文件夹有文件在等，它就在日志里说一声（同一个等待集合只说一次，新文件来了才再说），并告诉你该跑哪条命令：
-
-```shell
-docker exec orz python3 orz.py create "/media/TV show/新剧 (2026)"   # 新剧，还没有 tvshow.nfo
-docker exec orz python3 orz.py refresh "/media/TV show/某剧 (2020)"  # 取集缓存 / 重建 nfo
-docker exec orz python3 orz.py folder "/media/TV show/某剧 (2020)/Season 01"  # 改这一季（脱机）
-```
-
-开法：`.env` 里加 `ORZ_MANUAL_MODE=1`，重启容器。关掉就恢复自动——之前在手动模式下等的那些文件，因为没记快照，重启后第一次扫描就会处理。
-
-另外说明一下“轮询”：定时全量复扫从 v2.5.1 起默认就是关的（`ORZ_RESCAN_INTERVAL=0`），平时没有任何定时扫描；你之前看到的重复日志是启动补扫 + 文件夹改名触发的两次处理。v2.7.7 起，改文件夹名只产生一次处理（以前改名会把父目录也标成脏，触发一次多余的全量扫描）。
 
 ## 命令行只是测试和排错用
 
@@ -52,7 +38,7 @@ docker exec orz python3 orz.py create "/media/anime/罗梅莉亚战记 (2026)"
 docker exec orz python3 orz.py refresh "/media/anime/罗梅莉亚战记 (2026)"  # 出了新季 / 集名变了 / 缓存丢了
 docker exec orz python3 orz.py folder "/media/anime/罗梅莉亚战记 (2026)/Season 01"  # 手动改一季（脱机）
 docker exec orz python3 orz.py dry-run "/media/anime/罗梅莉亚战记 (2026)/Season 01"  # 只看会怎么改，不动文件
-docker exec orz python3 orz.py scan     # 手动跑一轮轮询
+docker exec orz python3 orz.py scan     # 手动跑一轮：补上容器停机期间移入的文件
 ```
 
 `folder` / `dry-run` 不需要 `TMDB_API_KEY`；`create` / `refresh` / `scan` / `watch` 需要。
@@ -116,9 +102,6 @@ TMDB 有时会把两季并在一季里列（青之箱：TMDB S1 列了 37 集，
 | `NAS_TV_DIR` | `/volume1/TV show` | NAS 本地电视剧目录（compose 挂载的冒号左边）；`.env` 里没有时用默认值 |
 | `NAS_ANIME_DIR` | `/volume1/Anime` | NAS 本地动画目录，同上 |
 | `ORZ_WATCH_DIRS` | `/media/anime,/media/tv-series` | 监控目录，逗号分隔；带空格的路径不用转义，整个值加引号，如 `"/media/TV show,/media/Anime"`。程序内部用 `os.path` 处理路径、不拼 shell 命令，所以空格不会断开路径 |
-| `ORZ_WATCH_MODE` | `inotify` | 事件驱动；`poll` 为轮询回落 |
-| `ORZ_RESCAN_INTERVAL` | `0` | 安全网全量复扫（秒），0 关；只在队列溢出时复扫 |
-| `ORZ_SCAN_INTERVAL` | `30` | 轮询模式间隔（秒） |
 | `ORZ_STABLE_SECONDS` | `5` | 文件大小不变几秒后才改名 |
 
 ## 出了问题怎么恢复

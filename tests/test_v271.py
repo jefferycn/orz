@@ -195,7 +195,7 @@ class TestSeasonNormalize(unittest.TestCase):
         root = os.path.join(tmp, "Anime")
         show_dir, season = _show(root, season_name="Season 1")
         _write(os.path.join(season, "Show - S01E01 - 第1集.mkv"))
-        w = Watcher(None, [root], interval=30, stable_seconds=0)
+        w = Watcher(None, [root], stable_seconds=0)
         w.scan_once()
         self.assertFalse(os.path.exists(os.path.join(show_dir, "Season 1")))
         self.assertTrue(os.path.exists(

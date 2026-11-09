@@ -158,7 +158,7 @@ class TestLazyRefresh(unittest.TestCase):
             _, season = _make_show(tmp)
             client = FakeTmdb()
             w = EventWatcher(client=client, roots=[tmp],
-                             stable_seconds=0.3, rescan_interval=0)
+                             stable_seconds=0.3)
             t = threading.Thread(target=w.watch, daemon=True)
             t.start()
             try:
