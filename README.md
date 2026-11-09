@@ -118,7 +118,7 @@ docker compose run --rm --build orz python3 tools/restore_from_log.py
 
 只恢复表里那 86 条记录：旧路径已存在、找不到、找到多个时都跳过，绝不覆盖；还会删掉受影响剧里过期的 `.orz/state.json`，以及空的重名季文件夹（比如 refresh 建出来的空 `Season 01`，而剧本身用 `Season 1`）。
 
-不是剧的文件夹不会被当成剧：Jellyfin 的图片（`landscape.jpg` / `backdrop.jpg` / `logo.png` / `*-thumb.jpg`）、字幕、nfo 文件，以及群晖的 `@eaDir`（里面甚至有以文件名命名的子文件夹，比如 `@eaDir/landscape.jpg/`），都不会触发 TMDB 查询、也不会记 warning；`@eaDir` 根本不监听。季文件夹除了 `Season 01` / `Specials`，`S02` / `S03` 这种短写法也认。
+不是剧的文件夹不会被当成剧：Jellyfin 的图片（`landscape.jpg` / `backdrop.jpg` / `logo.png` / `*-thumb.jpg`）、字幕、nfo 文件，以及群晖的 `@eaDir`（里面甚至有以文件名命名的子文件夹，比如 `@eaDir/landscape.jpg/`），都不会触发 TMDB 查询、也不会记 warning；`@eaDir` 根本不监听。季文件夹除了 `Season 01` / `Specials`，`S02` / `S03` 这种短写法也认。`Season 1` 合并进 `Season 01` 时，两边都有的 `season.nfo` 如果是同一季的记录（字节相同，或 `<seasonnumber>` 相同），旧那份会删掉，只留标准文件夹里的那份；季号对不上或解析不了的，旧文件夹原样保留。
 
 ## 本地开发
 

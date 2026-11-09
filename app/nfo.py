@@ -46,16 +46,47 @@ def find_season_dir(show_dir: str, season: int) -> str | None:
     return os.path.join(show_dir, sorted(matches, key=_rank)[0])
 
 
+def _season_nfo_duplicate(src: str, dst: str) -> bool:
+    """True when two season.nfo files describe the same season.
+
+    season.nfo is a regenerable sidecar (Jellyfin/Kodi write it; orz
+    never reads it).  When a merge retires the old folder, the copy
+    in it is dead data — but only delete it when it is provably the
+    same season's record: identical bytes, or the same
+    <seasonnumber> when both parse as XML.  Anything else is left
+    in place, like any other colliding file.
+    """
+    try:
+        with open(src, "rb") as f:
+            src_bytes = f.read()
+        with open(dst, "rb") as f:
+            dst_bytes = f.read()
+    except OSError:
+        return False
+    if src_bytes == dst_bytes:
+        return True
+    try:
+        src_num = ET.parse(src).getroot().findtext("seasonnumber")
+        dst_num = ET.parse(dst).getroot().findtext("seasonnumber")
+    except (ET.ParseError, OSError):
+        return False
+    if src_num is None or dst_num is None:
+        return False
+    return src_num.strip() == dst_num.strip()
+
+
 def normalize_season_dir(season_dir: str) -> str:
     """Rename an unpadded ``Season 1`` folder to the standard ``Season 01``.
 
     When the padded folder already exists, the files are moved into
     it instead; a file whose name already exists there is left in
-    place (never overwritten).  The source folder is removed only
-    once it is empty — when files had to stay behind, the old folder
-    stays too and the path returned is the old one, so the caller
-    still processes the leftovers.  Returns the folder's path after
-    normalizing (unchanged when already standard).
+    place (never overwritten) — except a duplicate season.nfo for
+    the same season, which is removed (see ``_season_nfo_duplicate``).
+    The source folder is removed only once it is empty — when files
+    had to stay behind, the old folder stays too and the path
+    returned is the old one, so the caller still processes the
+    leftovers.  Returns the folder's path after normalizing
+    (unchanged when already standard).
     """
     parent = os.path.dirname(season_dir.rstrip("/"))
     name = os.path.basename(season_dir.rstrip("/"))
@@ -71,6 +102,11 @@ def normalize_season_dir(season_dir: str) -> str:
             src = os.path.join(season_dir, entry)
             dst = os.path.join(target, entry)
             if os.path.exists(dst):
+                if entry == "season.nfo" and _season_nfo_duplicate(src, dst):
+                    os.remove(src)
+                    log.info("Removing duplicate season.nfo %s "
+                             "(same season as %s)", src, dst)
+                    continue
                 log.info("Not merging %s into %s: %s already exists",
                          src, target, entry)
                 continue
