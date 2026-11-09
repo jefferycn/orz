@@ -29,6 +29,8 @@ docker compose up -d --build
 
 已经是干净的 `剧名 - SxxEyy - 集名` 形式的文件一律不动：`Dragon Ball - S02E15 - ...` 放在 `Season 2` 里、orz 自己改过的 `绝望主妇 - S04E01 - ...`，都算已经整理好。只带集数标记但不是这个形式的，仍要改名：`Attack on Titan S01E01.mkv`、`A Sister's All You Need. E01 ...`、以及发布组文件名 `Desperate.Housewives.S04E01.1080p.WEB-DL...ass`（点号分隔、带编码和发布组标签的是下载名，不是资料库名），都会改成中文格式。文件名里没有明确集数标记的文件也是要改的（比如 `[Group] Show - 05.mkv`）。季标记和文件夹季号不一致的文件仍会处理（比如 `Season 2 - 05` 放在 `Season 01` 里）。集号只属于视频：字幕不占集号，后到的字幕即使视频已经改好名了也会跟着改；同集的两个视频才算冲突。
 
+`tvshow.nfo` 里的 TMDB 编号，orz 认三种写法：`<tmdbid>`（orz 和旧版 PHP 写的）、`<tmdb>` 和 `<uniqueid type="tmdb">`（Jellyfin/Kodi 写的）。如果 nfo 里完全没有 TMDB 编号（比如只有 TVDB 的 `<id>`），文件就算存在也读不出来：日志会报一条 warning（每小时每部剧只报一次，不会每个季文件夹、每轮都刷），说清原因并让你对这部剧跑一次 `orz refresh` 重建 nfo——不会擅自覆盖你原来的 nfo。
+
 ## 命令行只是测试和排错用
 
 ```shell

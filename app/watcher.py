@@ -72,7 +72,7 @@ from .inotify import (
     IN_Q_OVERFLOW, Inotify,
 )
 from .mapper import EpisodeMapper, load_override
-from .nfo import (generate_nfo, generate_season_folders,
+from .nfo import (generate_nfo, generate_season_folders, nfo_path,
                   normalize_season_dir, normalize_season_folders, read_nfo)
 from .parser import (
     is_already_named, parse_folder_name, season_number_from_folder,
@@ -95,6 +95,11 @@ DEFAULT_RESCAN_INTERVAL = 0  # safety-net full rescan, seconds (0 = off, default
 # not hit the API on every file event.
 _LAZY_REFRESH_COOLDOWN = 600  # seconds
 _LAST_LAZY_REFRESH: dict[str, float] = {}
+
+# A tvshow.nfo that exists but has no usable TMDB id: warn at most
+# once an hour per show, not once per season folder per pass.
+_BAD_NFO_THROTTLE = 3600  # seconds
+_BAD_NFO_LAST_LOG: dict[str, float] = {}
 
 
 def _snapshot(path: str) -> tuple | None:
@@ -287,7 +292,25 @@ def process_season_folder(season_dir: str, dry_run: bool = False,
     show_dir = os.path.dirname(season_dir.rstrip("/"))
     nfo = read_nfo(show_dir)
     if not nfo:
-        log.info("No tvshow.nfo in %s, skipping %s", show_dir, season_dir)
+        if os.path.exists(nfo_path(show_dir)):
+            # The file is there but unusable (no TMDB id, or not
+            # valid XML): say exactly that, with the remedy, and
+            # throttle it — otherwise every processing pass logs
+            # one line per season folder (v2.7.6: a folder rename
+            # produced the same lines four times in two seconds).
+            # Throttled per show (not per season): the CLI is a
+            # fresh process each run, so it always logs.
+            now = time.monotonic()
+            last = _BAD_NFO_LAST_LOG.get(show_dir)
+            if last is None or now - last >= _BAD_NFO_THROTTLE:
+                _BAD_NFO_LAST_LOG[show_dir] = now
+                log.warning(
+                    "tvshow.nfo in %s has no TMDB id (or is not valid "
+                    "XML), skipping %s — run `orz refresh %s` once to "
+                    "rebuild it from TMDB", show_dir, season_dir, show_dir)
+        else:
+            log.info("No tvshow.nfo in %s, skipping %s",
+                     show_dir, season_dir)
         return None
     # Nothing to rename here: do not fetch the episode cache for an
     # empty (or already organised) season folder.  This is what
@@ -324,8 +347,12 @@ def process_season_folder(season_dir: str, dry_run: bool = False,
                 "untouched.", nfo["title"], show_dir, reason, show_dir)
             return None
         now = time.monotonic()
-        last = _LAST_LAZY_REFRESH.get(show_dir, 0.0)
-        if now - last < _LAZY_REFRESH_COOLDOWN:
+        # NB: the "never attempted" sentinel is None, not 0.0:
+        # time.monotonic() is seconds since boot, so on a freshly
+        # started container it can be smaller than the cooldown and
+        # 0.0 would wrongly look like a recent attempt.
+        last = _LAST_LAZY_REFRESH.get(show_dir)
+        if last is not None and now - last < _LAZY_REFRESH_COOLDOWN:
             log.info("Episode cache still missing for %s, lazy refresh "
                      "cooling down, leaving files untouched",
                      nfo["title"])

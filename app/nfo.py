@@ -181,7 +181,16 @@ def generate_nfo(show: dict, show_dir: str) -> str:
 
 
 def read_nfo(show_dir: str) -> dict | None:
-    """``{"tmdbid": int, "title": str}`` or None when no/invalid nfo."""
+    """``{"tmdbid": int, "title": str}`` or None when no/invalid nfo.
+
+    The TMDB id is read from ``<tmdbid>`` (what orz and the old PHP
+    write), falling back to ``<tmdb>`` and ``<uniqueid type="tmdb">``
+    — the forms Jellyfin/Kodi write.  A file with no TMDB id at all
+    (e.g. only a TVDB ``<id>``) is unusable to orz: it returns None
+    even though the file exists, so the caller can tell the user to
+    run ``refresh`` once instead of silently treating the show as
+    new and overwriting their nfo.
+    """
     path = nfo_path(show_dir)
     if not os.path.exists(path):
         return None
@@ -190,10 +199,20 @@ def read_nfo(show_dir: str) -> dict | None:
     except ET.ParseError:
         return None
     tmdbid = root.findtext("tmdbid")
+    if tmdbid is None:
+        tmdbid = root.findtext("tmdb")
+    if tmdbid is None:
+        for el in root.findall("uniqueid"):
+            if el.get("type") == "tmdb":
+                tmdbid = el.text
+                break
     title = root.findtext("title")
-    if not tmdbid or not tmdbid.isdigit():
+    if tmdbid is None:
         return None
-    return {"tmdbid": int(tmdbid), "title": title or ""}
+    tmdbid = tmdbid.strip()
+    if not tmdbid.isdigit():
+        return None
+    return {"tmdbid": int(tmdbid), "title": (title or "").strip()}
 
 
 def generate_season_folders(show: dict, show_dir: str) -> list[str]:
