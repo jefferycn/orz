@@ -10,7 +10,7 @@ Jellyfin 剧集自动改名：监控 NAS 上的 TV series / Anime 目录，新�
 docker compose up -d
 ```
 
-它在后台每 30 秒轮询 `/media/anime` 和 `/media/tv-series`：
+它在后台每 30 秒轮询 `/media/TV show` 和 `/media/Anime`：
 
 1. 新建文件夹 `绝望主妇 (2004)`、`罗梅莉亚战记 (2026)` → 查 TMDB，写 `tvshow.nfo`、建 `Season 01` / `Specials`、并把集列表缓存到 `.orz/episodes.json`。
 2. 视频 / 字幕文件移入季文件夹 → 等文件大小稳定几秒（复制未完成不改名），按 `剧名 - S01E01 - 集名.mkv` 改名，字幕保留 `.zh.srt` / `.en.ass` 语言后缀、跟同名视频一起改。
@@ -54,6 +54,8 @@ pending 列表也存在 `.orz/state.json` 里（见下）。
 {"season_map": {"2": 1}, "episode_offset": {"2": 12}}
 ```
 
+还有一种常见情况：TMDB 明明有 S2，但 Season 01 里已经按绝对编号放了 S2 的前几集（青之箱：`S01E26-29` 其实是 S2E01-04）。这时程序认出 Season 01 已有超出 S1 集数的集，自动按绝对编号继续：`S2E05` → `S01E30`，集名仍取 S2E05 的标题（`戻ってきたよ`）。`Season 2 - 05` 这种写法也认得出：`Season 2` 是季、`05` 是集，不会把 2 和 05 当成两个候选集数。
+
 **3. 追剧时往已有 5 集的季文件夹放单集。** 先读已改好名的文件，算出已有集数和缺口：没数字的文件先补**最小缺口**（有 1、2、3、5 → 补 4），没缺口则取 max+1（有 1–5 → 6）。映射结果存在 `.orz/state.json`（文件指纹 → 集数），重扫不再重新猜。
 
 ## 文件布局
@@ -78,7 +80,7 @@ pending 列表也存在 `.orz/state.json` 里（见下）。
 | --- | --- | --- |
 | `TMDB_API_KEY` | — | 必填，[TMDB](https://www.themoviedb.org/documentation/api) 申请 |
 | `TMDB_LANGUAGE` | `zh-CN` | 集名语言 |
-| `ORZ_WATCH_DIRS` | `/media/anime,/media/tv-series` | 监控目录，逗号分隔 |
+| `ORZ_WATCH_DIRS` | `/media/anime,/media/tv-series` | 监控目录，逗号分隔；带空格的路径不用转义，整个值加引号，如 `"/media/TV show,/media/Anime"`。程序内部用 `os.path` 处理路径、不拼 shell 命令，所以空格不会断开路径 |
 | `ORZ_SCAN_INTERVAL` | `30` | 轮询间隔（秒） |
 | `ORZ_STABLE_SECONDS` | `5` | 文件大小不变几秒后才改名 |
 

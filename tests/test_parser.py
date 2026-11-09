@@ -52,6 +52,18 @@ class TestParser(unittest.TestCase):
         g = parse_episode("Show S2 01.mkv", "Show")
         self.assertEqual((g.episode, g.season), (1, 2))
 
+    def test_season_word_marker(self):
+        # 青之箱实测：Season 2 - 05 里的 2 是季、05 是集，不能判 ambiguous。
+        f = "[Tsukigakirei] Ao no Hako Season 2 - 05 [WebRip 1080P AVC-8bit AAC][CHS&JPN].mp4"
+        g = parse_episode(f, "青之箱")
+        self.assertEqual((g.episode, g.season), (5, 2))
+        g = parse_episode("[Erai-raws] Ao no Hako Season 2 - 04 [1080p].mp4", "青之箱")
+        self.assertEqual((g.episode, g.season), (4, 2))
+        g = parse_episode("青之箱 第二季 - 05.mp4", "青之箱")
+        self.assertEqual((g.episode, g.season), (5, 2))
+        g = parse_episode("Show Season 2 Episode 5.mkv", "Show")
+        self.assertEqual((g.episode, g.season), (5, 2))
+
     def test_digit_named_show(self):
         # Show "24": the 24 is the show, 05 is the episode.
         self.assertEqual(parse_episode("24 - 05.mkv", "24").episode, 5)

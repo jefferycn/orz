@@ -116,8 +116,16 @@ def existing_episodes(season_dir: str) -> set[int]:
 
 
 def lowest_gap(existing: set[int]) -> int:
-    """Lowest missing episode starting at 1, else max + 1."""
-    n = 1
+    """Lowest missing episode, else max + 1.
+
+    Gaps are only searched from the *lowest episode already present*:
+    a folder holding only 26-29 (earlier episodes live elsewhere /
+    were already renamed) must fill 30 next, not "1".  A folder
+    holding 1,2,3,5 still fills 4; 1-5 fills 6.
+    """
+    if not existing:
+        return 1
+    n = min(existing)
     while n in existing:
         n += 1
     return n
@@ -160,6 +168,18 @@ def rename_season_folder(season_dir: str, show_title: str, show_dir: str,
     known: dict[str, int] = season_state.setdefault("files", {})
     _known_before = dict(known)
     _pending_before = list(season_state.get("pending", []))
+
+    # Absolute-numbering show?  If Season 01 already holds episodes
+    # past TMDB S1's count (青之箱: S01E26-29 are really S2E01-04),
+    # the show is numbered absolutely in Season 01 — S2 files must
+    # continue there (S2E05 -> S01E30) instead of starting Season 02.
+    # Only applies when renaming inside Season 01 itself.
+    if season == 1 and mapper.seasons.get(1):
+        s01_dir = os.path.join(show_dir, "Season 01")
+        if os.path.isdir(s01_dir):
+            if any(ep > len(mapper.seasons[1])
+                   for ep in existing_episodes(s01_dir)):
+                mapper.absolute_to = 1
 
     existing = existing_episodes(season_dir)
     # Episodes already claimed by stored mappings count as taken too.

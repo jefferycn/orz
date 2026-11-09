@@ -194,18 +194,31 @@ def parse_episode(filename: str, show_title: str | None = None) -> EpisodeGuess:
     if m:
         return EpisodeGuess(int(m.group(2)), int(m.group(1)), "high", "Season x Episode y")
 
-    # Season-only marker (``S2 01`` / ``第二季 03``): remember it,
-    # then let the bare-number step find the episode.
+    # Season-only marker (``S2 01`` / ``Season 2 - 05`` / ``第二季 03``):
+    # remember it, then let the bare-number step find the episode.
+    # "Season 2" must be stripped *before* the bare-number step, or
+    # its "2" looks like a second episode candidate ("Season 2 - 05"
+    # used to come out as ambiguous ['2', '05'] and never rename).
     season: int | None = None
-    m = re.search(r"(?i)\bS(\d{1,2})\b", cleaned)
+    m = re.search(r"(?i)\bseason\s*(\d{1,2})\b", cleaned)
     if m:
         season = int(m.group(1))
-        cleaned = re.sub(r"(?i)\bS\d{1,2}\b", " ", cleaned)
+        cleaned = re.sub(r"(?i)\bseason\s*\d{1,2}\b", " ", cleaned)
     else:
-        m = re.search(r"第\s*(\d{1,2})\s*季", cleaned)
+        m = re.search(r"(?i)\bS(\d{1,2})\b", cleaned)
         if m:
             season = int(m.group(1))
-            cleaned = re.sub(r"第\s*\d{1,2}\s*季", " ", cleaned)
+            cleaned = re.sub(r"(?i)\bS\d{1,2}\b", " ", cleaned)
+        else:
+            m = re.search(r"第\s*(\d{1,2})\s*季", cleaned)
+            if m:
+                season = int(m.group(1))
+                cleaned = re.sub(r"第\s*\d{1,2}\s*季", " ", cleaned)
+            else:
+                m = re.search(r"第([一二三四五六七八九十])季", cleaned)
+                if m:
+                    season = "一二三四五六七八九十".index(m.group(1)) + 1
+                    cleaned = re.sub(r"第[一二三四五六七八九十]季", " ", cleaned)
 
     # 2. Eyy alone / EPyy / 第x集 / 第x话
     m = re.search(r"(?i)\bE(?:P|p)?\s*(\d{1,3})\b", cleaned)

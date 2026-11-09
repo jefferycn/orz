@@ -64,8 +64,23 @@ class EpisodeMapper:
             self._starts[s] = total + 1
             total += len(self.seasons[s])
         self.total_episodes = total
+        # Set by the renamer when the show already uses absolute
+        # numbering in Season 01 (see renamer.py): S2 files then map
+        # to S01E<absolute> instead of a direct S02E<ep> hit.
+        self.absolute_to: int | None = None
 
     # -- helpers -------------------------------------------------------
+    def _absolute_title(self, absolute: int) -> str:
+        """Episode title at an absolute position across TMDB seasons."""
+        n = 0
+        for s in sorted(self.seasons):
+            if s == 0:
+                continue
+            for ep in sorted(self.seasons[s]):
+                n += 1
+                if n == absolute:
+                    return self.seasons[s][ep]
+        return ""
     def _absolute(self, season: int, episode: int) -> int | None:
         """Absolute episode number if the file season is a TMDB season."""
         if season not in self._starts:
@@ -119,6 +134,21 @@ class EpisodeMapper:
                 ts, te = target.split("x", 1)
                 ts, te = int(ts), int(te)
                 return ts, te, self._episode_title(ts, te)
+
+        # 1b. Absolute-numbering show (renamer set absolute_to):
+        # Season 01 already holds episodes past TMDB S1's count
+        # (e.g. 青之箱 S01E26-29 are really S2E01-04), so every
+        # S2+ file continues the absolute run in Season 01 instead
+        # of starting a Season 02.  Title comes from the absolute
+        # position across TMDB seasons, so S2E05 still gets its
+        # S2 title (e.g. 戻ってきたよ) as S01E30.
+        if self.absolute_to is not None:
+            absolute = file_episode
+            for s in sorted(self.seasons):
+                if s == 0 or s >= season:
+                    continue
+                absolute += len(self.seasons[s])
+            return self.absolute_to, absolute, self._absolute_title(absolute)
 
         # 2. Direct hit: the file season exists in TMDB.
         if season in self.seasons and file_episode in self.seasons[season]:

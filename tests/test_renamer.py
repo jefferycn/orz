@@ -125,5 +125,49 @@ class TestRenamer(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(show_dir, ".orz")))
 
 
+class TestAoNoHakoScreenshot(unittest.TestCase):
+    """青之箱 (2024) 实测场景：Season 01 里已有 S01E26-29，
+    新文件是 [Tsukigakirei] Ao no Hako Season 2 - 05 ..."""
+
+    def _setup(self, existing_eps, new_name, seasons):
+        tmp = tempfile.mkdtemp()
+        # 挂载路径带空格：/media/TV show/青之箱 (2024)/Season 01
+        show_dir = os.path.join(tmp, "TV show", "青之箱 (2024)")
+        season = os.path.join(show_dir, "Season 01")
+        os.makedirs(season)
+        titles = {26: "第 26 集", 27: "憧憬", 28: "只有一件事情哦",
+                  29: "是最强的感情"}
+        for ep in existing_eps:
+            name = f"青之箱 - S01E{ep} - {titles.get(ep, f'第{ep}集')}.mp4"
+            with open(os.path.join(season, name), "wb") as f:
+                f.write(f"content-{ep}".encode())
+        with open(os.path.join(season, new_name), "wb") as f:
+            f.write(b"content-new")
+        return show_dir, season, EpisodeMapper(seasons)
+
+    def test_s2e05_becomes_s01e30_with_s2_title(self):
+        seasons = {1: {i: f"第{i}集" for i in range(1, 26)},
+                   2: {1: "デジャブ", 2: "憧れ", 3: "1つのことだよ",
+                       4: "好きは最強の感情", 5: "戻ってきたよ"}}
+        show_dir, season, mapper = self._setup(
+            [26, 27, 28, 29],
+            "[Tsukigakirei] Ao no Hako Season 2 - 05 "
+            "[WebRip 1080P AVC-8bit AAC][CHS&JPN].mp4", seasons)
+        r = rename_season_folder(season, "青之箱", show_dir, mapper)
+        self.assertEqual(r.pending, [])
+        self.assertEqual(r.renamed[0][1], "青之箱 - S01E30 - 戻ってきたよ.mp4")
+        self.assertTrue(os.path.exists(
+            os.path.join(season, "青之箱 - S01E30 - 戻ってきたよ.mp4")))
+
+    def test_gap_fill_from_26_to_30_not_1(self):
+        # 只有 26-29 时，无数字文件应补 30，不是 1。
+        seasons = {1: {i: f"第{i}集" for i in range(1, 26)},
+                   2: {i: f"S2E{i}" for i in range(1, 13)}}
+        show_dir, season, mapper = self._setup(
+            [26, 27, 28, 29], "未命名.mp4", seasons)
+        r = rename_season_folder(season, "青之箱", show_dir, mapper)
+        self.assertEqual(r.renamed[0][1], "青之箱 - S01E30 - S2E5.mp4")
+
+
 if __name__ == "__main__":
     unittest.main()
