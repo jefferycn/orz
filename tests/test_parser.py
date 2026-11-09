@@ -1,0 +1,93 @@
+"""Tests for app.parser — no network, stdlib unittest only."""
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app.parser import (
+    base_name, is_organized, lang_suffix, organized_episode,
+    parse_episode, parse_folder_name, season_number_from_folder,
+)
+
+SHOW = "罗梅莉亚战记"
+
+
+class TestFolderName(unittest.TestCase):
+    def test_title_year(self):
+        self.assertEqual(parse_folder_name("绝望主妇 (2004)"), ("绝望主妇", 2004))
+        self.assertEqual(parse_folder_name("罗梅莉亚战记 (2026)"), ("罗梅莉亚战记", 2026))
+
+    def test_no_year(self):
+        self.assertEqual(parse_folder_name("Some Show"), ("Some Show", None))
+
+
+class TestParser(unittest.TestCase):
+    def test_bracket_group_and_resolution(self):
+        # Required case: [组] ... - 02 [1080p] -> 2, not 1080, not 02-as-group
+        g = parse_episode("[组] 罗梅莉亚战记 - 02 [1080p].mkv", SHOW)
+        self.assertEqual((g.episode, g.season), (2, None))
+
+    def test_sxxeyy_priority(self):
+        g = parse_episode("罗梅莉亚战记 - S01E05 - 标题.mkv", SHOW)
+        self.assertEqual((g.episode, g.season, g.confidence), (5, 1, "high"))
+
+    def test_720_and_1080_are_not_episodes(self):
+        g = parse_episode("Show 2024 1080p 03.mkv", "Show")
+        self.assertEqual(g.episode, 3)
+        g = parse_episode("[Group] Show - 720p - 07.mkv", "Show")
+        self.assertEqual(g.episode, 7)
+
+    def test_codec_and_year_stripped(self):
+        g = parse_episode("Show - 04 x265 10bit WEB-DL.mkv", "Show")
+        self.assertEqual(g.episode, 4)
+
+    def test_e_alone_and_chinese(self):
+        self.assertEqual(parse_episode("Show E07.mkv", "Show").episode, 7)
+        self.assertEqual(parse_episode("Show 第5集.mkv", "Show").episode, 5)
+        self.assertEqual(parse_episode("Show 第2季第3集.mkv", "Show").episode, 3)
+        self.assertEqual(parse_episode("Show 第2季第3集.mkv", "Show").season, 2)
+
+    def test_season_only_marker(self):
+        g = parse_episode("Show S2 01.mkv", "Show")
+        self.assertEqual((g.episode, g.season), (1, 2))
+
+    def test_digit_named_show(self):
+        # Show "24": the 24 is the show, 05 is the episode.
+        self.assertEqual(parse_episode("24 - 05.mkv", "24").episode, 5)
+        self.assertEqual(parse_episode("[G] 24 - 05 [1080p].mkv", "24").episode, 5)
+        self.assertEqual(parse_episode("86 - 02.mkv", "86").episode, 2)
+
+    def test_no_number_is_not_01(self):
+        # The old fallback to 01 is gone: no number -> episode None.
+        g = parse_episode("罗梅莉亚战记 - 特别篇.mkv", SHOW)
+        self.assertIsNone(g.episode)
+        self.assertEqual(g.confidence, "none")
+
+    def test_ambiguous_numbers_not_guessed(self):
+        g = parse_episode("Show 03 04.mkv", "Show")
+        self.assertIsNone(g.episode)
+
+
+class TestOrganized(unittest.TestCase):
+    def test_already_organised_skip(self):
+        name = "罗梅莉亚战记 - S01E05 - 标题.mkv"
+        self.assertTrue(is_organized(name, SHOW))
+        self.assertEqual(organized_episode(name), (1, 5))
+        self.assertFalse(is_organized("罗梅莉亚战记 - 05.mkv", SHOW))
+
+    def test_season_folder(self):
+        self.assertEqual(season_number_from_folder("Season 01"), 1)
+        self.assertEqual(season_number_from_folder("Specials"), 0)
+        self.assertIsNone(season_number_from_folder("Extras"))
+
+    def test_subtitle_lang_suffix(self):
+        self.assertEqual(base_name("Title.zh.srt"), "Title")
+        self.assertEqual(base_name("Title.en.ass"), "Title")
+        self.assertEqual(base_name("Title.mkv"), "Title")
+        self.assertEqual(lang_suffix("Title.zh.srt"), ".zh")
+        self.assertEqual(lang_suffix("Title.srt"), "")
+
+
+if __name__ == "__main__":
+    unittest.main()

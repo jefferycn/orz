@@ -1,0 +1,15 @@
+# orz 2.0 — 示例 compose。平时不用敲命令：容器启动后自动监控。
+services:
+  orz:
+    build: .
+    container_name: orz
+    restart: unless-stopped
+    volumes:
+      # 剧集目录（群晖 NAS 路径按实际情况改）
+      - /volume1/media/anime:/media/anime
+      - /volume1/media/tv-series:/media/tv-series
+    environment:
+      TMDB_API_KEY: ${TMDB_API_KEY:?请在 .env 里设置 TMDB_API_KEY}
+      TMDB_LANGUAGE: zh-CN
+      # ORZ_SCAN_INTERVAL: "30"        # 轮询间隔（秒），默认 30
+      # ORZ_STABLE_SECONDS: "5"        # 文件大小不变几秒后才改名，默认 5
