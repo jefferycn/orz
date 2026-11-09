@@ -22,7 +22,7 @@ docker compose up -d
 - 文件夹写 `青春猪头少年不会梦到兔女郎学姐 (2018)`：TMDB 有这个中文译名，搜得到，`tvshow.nfo` 里的 title 就是中文，改名后也是中文。
 - 文件夹写英文 `Giji Harem (2024)`：只要 TMDB 有 zh-CN 译名（疑似后宫），`tvshow.nfo` 和改名结果同样是中文。文件夹用英文更稳：中文译名如果跟 TMDB 的 zh-CN 译名不一致（比如你写“伪恋”，TMDB 写“疑似后宫”），搜不到就建不出 NFO。
 - TMDB 没有某部剧的 zh-CN 译名时，`name` 会回落到原名 / 英文，改名结果就是原名 / 英文，不是文件夹名。
-3. 改名**脱机完成**：只读本地 `tvshow.nfo` + `.orz/episodes.json`，每次改名**不调 TMDB**。TMDB 只在新建剧集（`create`）或刷新（`refresh`）时调一次，没网也能改名。
+3. 改名**脱机完成**：只读本地 `tvshow.nfo` + `.orz/episodes.json`，每次改名**不调 TMDB**。TMDB 只在新建剧集（`create`）、刷新（`refresh`）时调一次，没网也能改名。旧版 PHP 留下的剧只有 nfo、没有集缓存：第一次有文件放进它的季文件夹时，程序会去 TMDB 取一次缓存、同一轮就把文件改了，不用手动 `refresh`；取不到（文件夹名跟 TMDB 对不上）就记 warning、文件不动，10 分钟内不再重试。
 
 启动时先加 watch 再全量扫一遍补漏：容器停机期间移入的文件，只要大小已稳定，第一次扫描就处理；启动后才到的文件会触发事件，不会漏。安全网默认是关的（全量复扫 `ORZ_RESCAN_INTERVAL=0`），只在 inotify 队列溢出时复扫一次；想开每小时复扫就设 `ORZ_RESCAN_INTERVAL=3600`。inotify 不可用时自动回落到轮询（`ORZ_WATCH_MODE=poll`）。
 
@@ -48,7 +48,7 @@ docker exec orz python3 orz.py scan     # 手动跑一轮轮询
   - `episode 13 has no TMDB match` —— 集数超出已知范围；
   - `episode 2 already exists (collision, not overwriting)` —— 目标集已存在，绝不覆盖；
   - `no number found` —— 文件名里找不到可信集数，且无法补位。
-- `No episode cache ... run orz refresh ...` —— 旧版 PHP 留下的剧只有 nfo、没有集缓存，跑一次 `refresh` 即可，之后永久脱机。
+- `No episode cache ...` —— 旧版 PHP 留下的剧只有 nfo、没有集缓存，`watch` / `scan` 会在第一次有文件进来时自动去 TMDB 取一次（懒刷新）；`folder` / `dry-run` 是脱机的，没有 TMDB 客户端，才会提示手动跑一次 `refresh`。
 
 pending 列表也存在 `.orz/state.json` 里（见下）。
 
@@ -105,4 +105,4 @@ python3 orz.py watch                        # 本地跑守护进程
 
 ## 从 PHP 旧版迁移
 
-旧版只写了 `tvshow.nfo`、没有 `.orz/episodes.json`，改名时会报缺缓存。对每个旧剧跑一次 `refresh`（或等新剧建文件夹时自动 `create`），之后就脱机了。另修了一个旧 bug：`getExactMatch` 原来拿 `results[0]` 的 `first_air_date` 去校验所有结果的年份，现在每个结果用自己的首播年份校验。
+旧版只写了 `tvshow.nfo`、没有 `.orz/episodes.json`：第一次有文件放进它的季文件夹时，程序自动去 TMDB 取一次缓存、同一轮就把文件改了，不用手动 `refresh`，也不用批量刷。空的季文件夹不会触发取缓存，所以启动补扫不会把所有旧剧都刷一遍。另修了一个旧 bug：`getExactMatch` 原来拿 `results[0]` 的 `first_air_date` 去校验所有结果的年份，现在每个结果用自己的首播年份校验。

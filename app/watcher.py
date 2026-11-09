@@ -30,9 +30,10 @@ How it works
   ``.orz/episodes.json``).
 * Season folder -> rename, **offline**: only the local
   ``tvshow.nfo`` and ``.orz/episodes.json`` are read; TMDB is
-  never called here.  If the episode cache is missing, the files
-  are left pending with a clear reason ("run ``orz refresh
-  <show>`` once") instead of quietly calling TMDB.
+  never called here — except once, lazily: if the episode cache
+  is missing (an old show that only has ``tvshow.nfo``), the
+  first file event fetches it from TMDB and renaming continues
+  in the same pass.  No manual ``refresh``, no bulk job.
 * Safety net: a full rescan only on inotify queue overflow, in
   case an event was ever missed.  The periodic rescan is off by
   default (``ORZ_RESCAN_INTERVAL=0``) — files here are moved
@@ -63,8 +64,8 @@ from .inotify import (
 )
 from .mapper import EpisodeMapper, load_override
 from .nfo import generate_nfo, generate_season_folders, read_nfo
-from .parser import parse_folder_name, season_number_from_folder
-from .renamer import rename_season_folder
+from .parser import is_organized, parse_folder_name, season_number_from_folder
+from .renamer import RenameResult, group_files, rename_season_folder
 from .tmdb import TmdbClient
 
 log = logging.getLogger("orz.watcher")
@@ -73,6 +74,13 @@ DEFAULT_ROOTS = ["/media/anime", "/media/tv-series"]
 DEFAULT_INTERVAL = 30        # seconds between scans (polling fallback)
 DEFAULT_STABLE_SECONDS = 5   # file size/mtime unchanged for this long
 DEFAULT_RESCAN_INTERVAL = 0  # safety-net full rescan, seconds (0 = off, default)
+
+# Lazy refresh: when a show has no episode cache, the first file
+# event fetches it from TMDB once.  A failed fetch is not retried
+# for this long, so a folder whose name does not match TMDB does
+# not hit the API on every file event.
+_LAZY_REFRESH_COOLDOWN = 600  # seconds
+_LAST_LAZY_REFRESH: dict[str, float] = {}
 
 
 def _snapshot(path: str) -> tuple | None:
@@ -92,7 +100,7 @@ def create_show(show_dir: str, client: TmdbClient, dry_run: bool = False) -> boo
     that talks to TMDB (the other is ``refresh_show``).
     """
     title, year = parse_folder_name(os.path.basename(show_dir.rstrip("/")))
-    if not title:
+    if not title or title.startswith("."):
         log.info("Ignoring %s: no title", show_dir)
         return False
     show = client.find_show(title, year)
@@ -145,30 +153,65 @@ def refresh_show(show_dir: str, client: TmdbClient, dry_run: bool = False) -> bo
 def process_season_folder(season_dir: str, dry_run: bool = False,
                           stable_files: set[str] | None = None,
                           client: TmdbClient | None = None):
-    """Rename files in one Season folder, offline.
+    """Rename files in one Season folder.
 
-    Reads only ``tvshow.nfo`` + ``.orz/episodes.json``.  ``client`` is
-    accepted for backwards compatibility and is never used here.
-    Returns the RenameResult, or None when the folder cannot be
-    processed (no nfo / no episode cache — both logged with what to do).
+    Reads ``tvshow.nfo`` + ``.orz/episodes.json``.  When the episode
+    cache is missing (or for a different TMDB id) *and* a TMDB
+    client was supplied, the show is refreshed from TMDB once,
+    right here, and renaming continues in the same pass — no
+    manual ``refresh`` needed.  A failed refresh is not retried
+    for ``_LAZY_REFRESH_COOLDOWN`` seconds, so a folder whose
+    name does not match TMDB does not spam the API on every
+    file event.  Without a client (the ``folder`` / ``dry-run``
+    commands) the files are left untouched and the log says to
+    run ``refresh`` once.
     """
     show_dir = os.path.dirname(season_dir.rstrip("/"))
     nfo = read_nfo(show_dir)
     if not nfo:
         log.info("No tvshow.nfo in %s, skipping %s", show_dir, season_dir)
         return None
+    # Nothing to rename here: do not fetch the episode cache for an
+    # empty (or already organised) season folder.  This is what
+    # keeps lazy refresh lazy — the startup catch-up scan must not
+    # turn into a refresh of every old show on disk, only the shows
+    # that actually have files waiting.
+    groups = group_files(season_dir)
+    unorganised = [files for files in groups.values()
+                   if not all(is_organized(f, nfo["title"]) for f in files)]
+    if not unorganised:
+        result = RenameResult()
+        result.skipped = [f for files in groups.values() for f in files]
+        return result
     cached = load_episodes(show_dir)
-    if cached is None:
-        log.warning(
-            "No episode cache for %s (%s): run `orz refresh %s` once, "
-            "then renames work offline. Leaving files untouched.",
-            nfo["title"], show_dir, show_dir)
-        return None
-    if cached.get("tmdbid") != nfo["tmdbid"]:
-        log.warning("Episode cache in %s is for TMDB id %s but nfo says %s; "
-                    "run `orz refresh %s`.", show_dir, cached.get("tmdbid"),
-                    nfo["tmdbid"], show_dir)
-        return None
+    if cached is None or cached.get("tmdbid") != nfo["tmdbid"]:
+        if client is None:
+            reason = ("no episode cache" if cached is None
+                      else f"episode cache is for TMDB id "
+                           f"{cached.get('tmdbid')} but nfo says "
+                           f"{nfo['tmdbid']}")
+            log.warning(
+                "No episode cache for %s (%s, %s): run `orz refresh %s` "
+                "once, then renames work offline. Leaving files "
+                "untouched.", nfo["title"], show_dir, reason, show_dir)
+            return None
+        now = time.monotonic()
+        last = _LAST_LAZY_REFRESH.get(show_dir, 0.0)
+        if now - last < _LAZY_REFRESH_COOLDOWN:
+            log.info("Episode cache still missing for %s, lazy refresh "
+                     "cooling down, leaving files untouched",
+                     nfo["title"])
+            return None
+        _LAST_LAZY_REFRESH[show_dir] = now
+        log.info("No episode cache for %s, fetching from TMDB once",
+                 nfo["title"])
+        if not refresh_show(show_dir, client, dry_run=dry_run):
+            return None
+        cached = load_episodes(show_dir)
+        if cached is None:
+            log.warning("Refresh of %s did not write an episode cache",
+                        show_dir)
+            return None
     mapper = EpisodeMapper(cached["seasons"], load_override(show_dir))
     result = rename_season_folder(season_dir, nfo["title"], show_dir,
                                   mapper, dry_run=dry_run,
@@ -246,6 +289,8 @@ class Watcher:
                 log.warning("Watch root missing: %s", root)
                 continue
             for show_name in sorted(os.listdir(root)):
+                if show_name.startswith("."):
+                    continue
                 show_dir = os.path.join(root, show_name)
                 if not os.path.isdir(show_dir):
                     continue
@@ -274,7 +319,7 @@ class Watcher:
                     stable_files = self._stable_files_in(season_dir)
                     result = process_season_folder(
                         season_dir, dry_run=self.dry_run,
-                        stable_files=stable_files)
+                        stable_files=stable_files, client=self.client)
                     if result is None and show_dir not in self._warned_no_cache:
                         self._warned_no_cache.add(show_dir)
 
@@ -336,6 +381,8 @@ class EventWatcher:
         self._path_to_wd[path] = wd
 
     def _add_watch_recursive(self, path: str) -> None:
+        if os.path.basename(path.rstrip("/")) == ".orz":
+            return
         for dirpath, dirnames, _filenames in os.walk(path):
             # .orz holds state.json, written by the renamer itself;
             # watching it would only re-trigger on our own writes.
@@ -358,6 +405,11 @@ class EventWatcher:
     def _handle_event(self, wd: int, mask: int, name: str) -> None:
         path = self._wd_to_path.get(wd)
         if path is None:
+            return
+        # .orz is orz's own state directory (episodes.json /
+        # state.json, written by the renamer itself) — never a
+        # show, never watched, never processed.
+        if os.path.basename(path.rstrip("/")) == ".orz" or name == ".orz":
             return
         if mask & IN_Q_OVERFLOW:
             log.warning("inotify queue overflow, doing a full rescan")
@@ -399,6 +451,8 @@ class EventWatcher:
             create_show(show_dir, self.client, dry_run=self.dry_run)
             return
         for entry in sorted(os.listdir(show_dir)):
+            if entry == ".orz":
+                continue
             season_dir = os.path.join(show_dir, entry)
             if (os.path.isdir(season_dir)
                     and season_number_from_folder(entry) is not None):
@@ -409,7 +463,8 @@ class EventWatcher:
             return
         stable = self._poller._stable_files_in(season_dir)
         result = process_season_folder(
-            season_dir, dry_run=self.dry_run, stable_files=stable)
+            season_dir, dry_run=self.dry_run, stable_files=stable,
+            client=self.client)
         if result is not None and any(
                 "still copying" in p.get("reason", "")
                 for p in result.pending):
@@ -424,6 +479,8 @@ class EventWatcher:
             if due > now:
                 continue
             del self._dirty[path]
+            if os.path.basename(path.rstrip("/")) == ".orz":
+                continue
             try:
                 if path in self.roots:
                     self._rescan()
