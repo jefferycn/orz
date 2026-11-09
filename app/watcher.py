@@ -33,11 +33,14 @@ How it works
   never called here.  If the episode cache is missing, the files
   are left pending with a clear reason ("run ``orz refresh
   <show>`` once") instead of quietly calling TMDB.
-* Safety net: a full rescan every ``rescan_interval`` (default
-  1 h, ``ORZ_RESCAN_INTERVAL=0`` disables it) and on inotify
-  queue overflow, in case an event was ever missed.  The rescan
-  is the only periodic directory read; normal operation reads
-  nothing until an event arrives.
+* Safety net: a full rescan only on inotify queue overflow, in
+  case an event was ever missed.  The periodic rescan is off by
+  default (``ORZ_RESCAN_INTERVAL=0``) — files here are moved
+  within the NAS, never slowly copied in, so there is nothing to
+  catch up on; set ``ORZ_RESCAN_INTERVAL=3600`` to turn the
+  hourly rescan back on.  The rescan is the only periodic
+  directory read; normal operation reads nothing until an event
+  arrives.
 
 De-duplication: processing is single-threaded, already-renamed
 files are skipped by name, and the renamer's ``.orz/state.json``
@@ -69,7 +72,7 @@ log = logging.getLogger("orz.watcher")
 DEFAULT_ROOTS = ["/media/anime", "/media/tv-series"]
 DEFAULT_INTERVAL = 30        # seconds between scans (polling fallback)
 DEFAULT_STABLE_SECONDS = 5   # file size/mtime unchanged for this long
-DEFAULT_RESCAN_INTERVAL = 3600  # safety-net full rescan, seconds (0 = off)
+DEFAULT_RESCAN_INTERVAL = 0  # safety-net full rescan, seconds (0 = off, default)
 
 
 def _snapshot(path: str) -> tuple | None:
@@ -449,9 +452,10 @@ class EventWatcher:
     # -- main loop ------------------------------------------------------
     def start(self) -> None:
         log.info("Watching %s (inotify, files stable after %ss, "
-                 "safety rescan every %ss)",
+                 "safety rescan %s)",
                  ", ".join(self.roots), self.stable_seconds,
-                 self.rescan_interval or "off")
+                 f"every {self.rescan_interval}s"
+                 if self.rescan_interval else "off")
         # Watches first, catch-up scan second: a file that arrives
         # after the watches are on generates an event, and a file
         # that was already there is picked up by the scan.  The

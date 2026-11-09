@@ -24,7 +24,7 @@ docker compose up -d
 - TMDB 没有某部剧的 zh-CN 译名时，`name` 会回落到原名 / 英文，改名结果就是原名 / 英文，不是文件夹名。
 3. 改名**脱机完成**：只读本地 `tvshow.nfo` + `.orz/episodes.json`，每次改名**不调 TMDB**。TMDB 只在新建剧集（`create`）或刷新（`refresh`）时调一次，没网也能改名。
 
-启动时先加 watch 再全量扫一遍补漏：容器停机期间移入的文件，只要大小已稳定，第一次扫描就处理；启动后才到的文件会触发事件，不会漏。安全网：每小时全量复扫一次（防事件丢失 / 队列溢出），`ORZ_RESCAN_INTERVAL=0` 可关；inotify 不可用时自动回落到轮询（`ORZ_WATCH_MODE=poll`）。
+启动时先加 watch 再全量扫一遍补漏：容器停机期间移入的文件，只要大小已稳定，第一次扫描就处理；启动后才到的文件会触发事件，不会漏。安全网默认是关的（全量复扫 `ORZ_RESCAN_INTERVAL=0`），只在 inotify 队列溢出时复扫一次；想开每小时复扫就设 `ORZ_RESCAN_INTERVAL=3600`。inotify 不可用时自动回落到轮询（`ORZ_WATCH_MODE=poll`）。
 
 ## 命令行只是测试和排错用
 
@@ -92,7 +92,7 @@ pending 列表也存在 `.orz/state.json` 里（见下）。
 | `TMDB_LANGUAGE` | `zh-CN` | 集名语言 |
 | `ORZ_WATCH_DIRS` | `/media/anime,/media/tv-series` | 监控目录，逗号分隔；带空格的路径不用转义，整个值加引号，如 `"/media/TV show,/media/Anime"`。程序内部用 `os.path` 处理路径、不拼 shell 命令，所以空格不会断开路径 |
 | `ORZ_WATCH_MODE` | `inotify` | 事件驱动；`poll` 为轮询回落 |
-| `ORZ_RESCAN_INTERVAL` | `3600` | 安全网全量复扫（秒），0 关 |
+| `ORZ_RESCAN_INTERVAL` | `0` | 安全网全量复扫（秒），0 关；只在队列溢出时复扫 |
 | `ORZ_SCAN_INTERVAL` | `30` | 轮询模式间隔（秒） |
 | `ORZ_STABLE_SECONDS` | `5` | 文件大小不变几秒后才改名 |
 

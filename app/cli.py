@@ -25,7 +25,7 @@ Environment:
     TMDB_LANGUAGE      default zh-CN
     ORZ_WATCH_DIRS     comma-separated roots, default /media/anime,/media/tv-series
     ORZ_WATCH_MODE     inotify (default) or poll
-    ORZ_RESCAN_INTERVAL safety-net full rescan seconds, default 3600 (0 = off)
+    ORZ_RESCAN_INTERVAL safety-net full rescan seconds, default 0 (off)
     ORZ_CACHE_DIR      TMDB HTTP response cache, default ./var/cache
     ORZ_SCAN_INTERVAL  poll-mode interval seconds, default 30
     ORZ_STABLE_SECONDS file size/mtime unchanged window, default 5
