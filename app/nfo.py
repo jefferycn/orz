@@ -1,6 +1,7 @@
 """tvshow.nfo read/write (Kodi/Jellyfin format, same fields as the PHP)."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -8,17 +9,22 @@ from xml.sax.saxutils import escape
 
 from .parser import season_number_from_folder
 
+log = logging.getLogger("orz.nfo")
+
+_UNPADDED_SEASON_RE = re.compile(r"Season ([1-9]\d*)$")
+
 
 def find_season_dir(show_dir: str, season: int) -> str | None:
     """Existing folder for a season number, in any naming variant.
 
     ``Season 1`` / ``Season 01`` / ``Specials`` (season 0) all count.
-    When both ``Season 1`` and ``Season 01`` exist, the unpadded
-    one wins — it is the user's own folder; the padded one was
-    probably created by an earlier orz refresh.  Returns None when
-    no folder for that season exists (the caller must not invent
-    one: a rename that cannot find its target season folder stays
-    where it is).
+    When both ``Season 1`` and ``Season 01`` exist, the padded one
+    wins — padded is the standard name (see
+    ``normalize_season_folders``); the unpadded one is a leftover
+    that gets merged away on the next scan.  Returns None when no
+    folder for that season exists (the caller must not invent one: a
+    rename that cannot find its target season folder stays where it
+    is).
     """
     try:
         entries = sorted(os.listdir(show_dir))
@@ -31,13 +37,83 @@ def find_season_dir(show_dir: str, season: int) -> str | None:
         return None
 
     def _rank(name: str) -> tuple[int, str]:
-        if name == f"Season {season}":
-            return (0, name)
         if name == f"Season {season:02d}":
+            return (0, name)
+        if name == f"Season {season}":
             return (1, name)
         return (2, name)
 
     return os.path.join(show_dir, sorted(matches, key=_rank)[0])
+
+
+def normalize_season_dir(season_dir: str) -> str:
+    """Rename an unpadded ``Season 1`` folder to the standard ``Season 01``.
+
+    When the padded folder already exists, the files are moved into
+    it instead; a file whose name already exists there is left in
+    place (never overwritten).  The source folder is removed only
+    once it is empty — when files had to stay behind, the old folder
+    stays too and the path returned is the old one, so the caller
+    still processes the leftovers.  Returns the folder's path after
+    normalizing (unchanged when already standard).
+    """
+    parent = os.path.dirname(season_dir.rstrip("/"))
+    name = os.path.basename(season_dir.rstrip("/"))
+    m = _UNPADDED_SEASON_RE.match(name)
+    if not m:
+        return season_dir
+    target_name = f"Season {int(m.group(1)):02d}"
+    target = os.path.join(parent, target_name)
+    if target == season_dir:
+        return season_dir
+    if os.path.isdir(target):
+        for entry in sorted(os.listdir(season_dir)):
+            src = os.path.join(season_dir, entry)
+            dst = os.path.join(target, entry)
+            if os.path.exists(dst):
+                log.info("Not merging %s into %s: %s already exists",
+                         src, target, entry)
+                continue
+            os.rename(src, dst)
+        try:
+            os.rmdir(season_dir)
+        except OSError:
+            log.info("Leaving %s: files remain after merge into %s",
+                     season_dir, target)
+            return season_dir
+        log.info("Merged %s into %s", season_dir, target)
+        return target
+    os.rename(season_dir, target)
+    log.info("Renamed season folder %s -> %s", season_dir, target)
+    return target
+
+
+def normalize_season_folders(show_dir: str) -> dict[str, str]:
+    """Rename every unpadded season folder in a show to the standard.
+
+    ``Season 1`` -> ``Season 01`` (merging into an existing
+    ``Season 01`` when there is one).  ``Specials`` and already
+    padded folders are untouched.  Returns {old name: new name}
+    for the folders that changed.  Cheap (listdir + renames only),
+    so the scan runs it for every show even when the snapshots say
+    nothing changed — a folder renamed by hand must still be
+    standardised.
+    """
+    renamed = {}
+    try:
+        entries = sorted(os.listdir(show_dir))
+    except OSError:
+        return renamed
+    for entry in entries:
+        path = os.path.join(show_dir, entry)
+        if not os.path.isdir(path):
+            continue
+        if season_number_from_folder(entry) is None:
+            continue
+        new_path = normalize_season_dir(path)
+        if new_path != path:
+            renamed[entry] = os.path.basename(new_path)
+    return renamed
 
 
 def nfo_path(show_dir: str) -> str:
@@ -88,29 +164,17 @@ def generate_season_folders(show: dict, show_dir: str) -> list[str]:
     """Create ``Season 01`` / ``Specials`` folders; return created paths.
 
     A season that already has a folder — in *any* naming variant,
-    e.g. the user's own ``Season 1`` — is left alone.  Never create
-    a padded ``Season 01`` next to an existing ``Season 1``.
-    New folders follow the show's existing style: if the show
-    already uses unpadded ``Season 1`` / ``Season 2``, a new
-    season is ``Season 3``, not ``Season 03``; with no existing
-    season folders the default is padded (``Season 01``).
+    e.g. the user's own ``Season 1`` — is left alone: the folder is
+    renamed to the padded standard by ``normalize_season_folders``
+    (run before this in ``refresh_show`` / the scan), not duplicated
+    here.  New folders are always padded (``Season 01``).
     """
-    try:
-        existing = os.listdir(show_dir)
-    except OSError:
-        existing = []
-    unpadded = any(re.match(r"Season [1-9]\d*$", e) for e in existing)
     created = []
     for season in show.get("seasons", []):
         n = season["season_number"]
         if find_season_dir(show_dir, n) is not None:
             continue
-        if n == 0:
-            name = "Specials"
-        elif unpadded:
-            name = f"Season {n}"
-        else:
-            name = f"Season {n:02d}"
+        name = "Specials" if n == 0 else f"Season {n:02d}"
         path = os.path.join(show_dir, name)
         if not os.path.exists(path):
             os.makedirs(path)

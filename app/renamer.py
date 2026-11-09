@@ -108,11 +108,18 @@ def group_files(season_dir: str) -> dict[str, list[str]]:
 
 
 def existing_episodes(season_dir: str) -> set[int]:
-    """Episode numbers already present as organised files in this folder."""
+    """Episode numbers already present as organised files in this folder.
+
+    Only files whose season marker matches this folder's season
+    count: a ``S02E01`` file sitting in ``Season 1`` is misplaced,
+    not an existing episode of Season 1 — counting it would make
+    the real ``S01E01`` collide with it.
+    """
+    season = season_number_from_folder(os.path.basename(season_dir))
     eps: set[int] = set()
     for name in os.listdir(season_dir):
         parsed = organized_episode(name)
-        if parsed:
+        if parsed and (season is None or parsed[0] == season):
             eps.add(parsed[1])
     return eps
 
@@ -238,21 +245,30 @@ def rename_season_folder(season_dir: str, show_title: str, show_dir: str,
 
         video = next((f for f in files
                       if f.rsplit(".", 1)[-1].lower() in VIDEO_EXTS), files[0])
-        fingerprint = _fingerprint(os.path.join(season_dir, video))
+        # The fingerprint (first 4 MiB of the video, hashed) is lazy:
+        # it is only needed to look up a stored mapping from an
+        # earlier scan, or to record a gap-fill guess.  A file whose
+        # name parses to an episode needs neither — a successful
+        # rename is recognised as organised on the next scan, so
+        # there is nothing to re-guess.  Computing it eagerly here
+        # cost ~4 GiB of page cache on a full-library startup scan.
+        fingerprint = None
 
         # 1. Stored mapping from a previous scan wins — no re-guessing.
-        if fingerprint in known:
-            ep = known[fingerprint]
-            mapped = mapper.map(season, ep)
-            if mapped and mapped[1] not in taken - {ep}:
-                _rename_group(season_dir, show_title, files, mapped[0],
-                              mapped[1], mapper, result, dry_run, taken,
-                              ep_title=mapped[2], known=known,
-                              show_dir=show_dir)
+        if known:
+            fingerprint = _fingerprint(os.path.join(season_dir, video))
+            if fingerprint in known:
+                ep = known[fingerprint]
+                mapped = mapper.map(season, ep)
+                if mapped and mapped[1] not in taken - {ep}:
+                    _rename_group(season_dir, show_title, files, mapped[0],
+                                  mapped[1], mapper, result, dry_run, taken,
+                                  ep_title=mapped[2], known=known,
+                                  show_dir=show_dir)
+                    continue
+                result.pending.append({"file": video,
+                                       "reason": "stored episode no longer maps"})
                 continue
-            result.pending.append({"file": video,
-                                   "reason": "stored episode no longer maps"})
-            continue
 
         # 2. Parse the filename.  An explicit SxxEyy / Eyy / 第x集
         # wins; otherwise a batch common-text guess wins over the
@@ -305,6 +321,10 @@ def rename_season_folder(season_dir: str, show_title: str, show_dir: str,
                 "reason": f"no episode number in name, and gap-fill "
                           f"episode {ep} has no TMDB match"})
             continue
+        if fingerprint is None:
+            # Gap-fill is a guess: record it, so a re-scan reuses
+            # the same episode instead of guessing again.
+            fingerprint = _fingerprint(os.path.join(season_dir, video))
         _rename_group(season_dir, show_title, files, mapped[0], mapped[1],
                       mapper, result, dry_run, taken,
                       fingerprint=fingerprint, ep_title=mapped[2],
@@ -333,8 +353,8 @@ def _rename_group(season_dir: str, show_title: str, files: list[str],
     # episodes): the filename just omits the " - title" part.
     # Absolute mapping can land in a different season than the folder
     # the file sits in (S2E01 -> S01E13): move it to that season's
-    # folder when one exists, reusing the user's own folder name
-    # (``Season 1``, not a newly invented ``Season 01``).  When no
+    # folder when one exists (the standard padded name, e.g.
+    # ``Season 01`` — see ``normalize_season_folders``).  When no
     # folder for the target season exists, the file stays where it
     # is — orz never creates season folders during a rename.
     dest_dir = season_dir

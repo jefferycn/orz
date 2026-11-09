@@ -86,13 +86,15 @@ class TestNonEpisodeMarkers(unittest.TestCase):
 
 
 class TestSeasonDirReuse(unittest.TestCase):
-    def test_find_prefers_unpadded(self):
+    def test_find_prefers_padded(self):
+        # v2.7 preferred the unpadded folder; v2.7.1 standardises on
+        # padded (the unpadded one is merged away by normalize).
         tmp = tempfile.mkdtemp()
         show_dir = os.path.join(tmp, "Show (2020)")
         os.makedirs(os.path.join(show_dir, "Season 1"))
         os.makedirs(os.path.join(show_dir, "Season 01"))
         self.assertEqual(find_season_dir(show_dir, 1),
-                         os.path.join(show_dir, "Season 1"))
+                         os.path.join(show_dir, "Season 01"))
         self.assertIsNone(find_season_dir(show_dir, 2))
 
     def test_generate_does_not_duplicate(self):
@@ -103,10 +105,11 @@ class TestSeasonDirReuse(unittest.TestCase):
                             {"season_number": 1},
                             {"season_number": 2}]}
         created = generate_season_folders(show, show_dir)
-        # Season 1 exists (unpadded) -> no Season 01; season 2 is
-        # new and follows the unpadded style -> "Season 2".
+        # Season 1 exists (unpadded) -> no Season 01 created here
+        # (normalize renames it instead); season 2 is new and is
+        # always padded -> "Season 02".
         self.assertEqual(created, [os.path.join(show_dir, "Specials"),
-                                   os.path.join(show_dir, "Season 2")])
+                                   os.path.join(show_dir, "Season 02")])
         self.assertFalse(os.path.exists(os.path.join(show_dir, "Season 01")))
         self.assertTrue(os.path.exists(os.path.join(show_dir, "Specials")))
 
@@ -206,7 +209,9 @@ class TestGapFillBlocked(unittest.TestCase):
 
     def test_rename_moves_to_unpadded_season_folder(self):
         # File in "Season 2" mapping to S01E13 must land in the
-        # user's "Season 1", never a new "Season 01".
+        # existing season-1 folder, never a newly created one.  (At
+        # this level the folder is still "Season 1"; in production
+        # process_season_folder normalizes it to "Season 01" first.)
         tmp = tempfile.mkdtemp()
         show_dir = os.path.join(tmp, f"{SHOW} (2026)")
         s1 = os.path.join(show_dir, "Season 1")

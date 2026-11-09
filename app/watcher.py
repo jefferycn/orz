@@ -72,7 +72,8 @@ from .inotify import (
     IN_Q_OVERFLOW, Inotify,
 )
 from .mapper import EpisodeMapper, load_override
-from .nfo import generate_nfo, generate_season_folders, read_nfo
+from .nfo import (generate_nfo, generate_season_folders,
+                  normalize_season_dir, normalize_season_folders, read_nfo)
 from .parser import (
     is_already_named, parse_folder_name, season_number_from_folder,
 )
@@ -217,6 +218,7 @@ def refresh_show(show_dir: str, client: TmdbClient, dry_run: bool = False) -> bo
         return True
     show_data = client.get_tvshow(show["id"])
     generate_nfo(show_data, show_dir)
+    normalize_season_folders(show_dir)
     generate_season_folders(show_data, show_dir)
     seasons = client.all_seasons(show["id"])
     air_dates = client.all_air_dates(show["id"])
@@ -244,6 +246,11 @@ def process_season_folder(season_dir: str, dry_run: bool = False,
     commands) the files are left untouched and the log says to
     run ``refresh`` once.
     """
+    if not dry_run:
+        # Standard name is padded (``Season 01``): an unpadded
+        # ``Season 1`` is renamed — or merged into an existing
+        # ``Season 01`` — before anything else touches it.
+        season_dir = normalize_season_dir(season_dir)
     show_dir = os.path.dirname(season_dir.rstrip("/"))
     nfo = read_nfo(show_dir)
     if not nfo:
@@ -415,6 +422,10 @@ class Watcher:
                         create_show(show_dir, self.client,
                                     dry_run=self.dry_run)
                     continue
+                # Standardise season folder names first (cheap, and
+                # snapshot gating must not skip it: a folder renamed
+                # by hand still needs standardising).
+                normalize_season_folders(show_dir)
                 for entry in sorted(os.listdir(show_dir)):
                     season_dir = os.path.join(show_dir, entry)
                     if not os.path.isdir(season_dir):
@@ -566,6 +577,7 @@ class EventWatcher:
                 return
             create_show(show_dir, self.client, dry_run=self.dry_run)
             return
+        normalize_season_folders(show_dir)
         for entry in sorted(os.listdir(show_dir)):
             if entry == ".orz":
                 continue
@@ -577,6 +589,8 @@ class EventWatcher:
     def _process_season_dir(self, season_dir: str) -> None:
         if not os.path.isdir(season_dir):
             return
+        if not self.dry_run:
+            season_dir = normalize_season_dir(season_dir)
         if _snapshot_unchanged(os.path.dirname(season_dir.rstrip("/")),
                                season_dir):
             # The event that marked this dir dirty changed nothing
