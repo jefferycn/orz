@@ -89,6 +89,18 @@ class TestParser(unittest.TestCase):
         g = parse_episode("[Group] Show [1080P] - 03.mkv", "Show")
         self.assertEqual(g.episode, 3)
 
+    def test_sc_tc_subtitle_lang_tags(self):
+        # .sc_v2 / .tc_v2 是简繁中文字幕，必须认成语言后缀：
+        # 剥掉后视频和两份字幕才同组，不剥则两份字幕都撞到同一个
+        # 目标名，pending。v2 本身不是语言标记。
+        self.assertEqual(lang_suffix("T.sc_v2.ass"), ".sc_v2")
+        self.assertEqual(lang_suffix("T.tc_v2.ass"), ".tc_v2")
+        self.assertEqual(lang_suffix("T.sc.ass"), ".sc")
+        self.assertEqual(base_name("T.sc_v2.ass"), "T")
+        self.assertEqual(base_name("T.tc_v2.ass"), "T")
+        self.assertEqual(lang_suffix("Title.v2.mkv"), "")
+        self.assertEqual(lang_suffix("Title.zh.srt"), ".zh")
+
     def test_digit_named_show(self):
         # Show "24": the 24 is the show, 05 is the episode.
         self.assertEqual(parse_episode("24 - 05.mkv", "24").episode, 5)

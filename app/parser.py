@@ -20,11 +20,26 @@ MEDIA_EXTS = VIDEO_EXTS | SUBTITLE_EXTS
 
 # Language tags that sit between the base name and the subtitle extension,
 # e.g. ``Show - S01E02 - Title.zh.srt`` / ``...en.ass``.
+# ``sc`` / ``tc`` are Simplified / Traditional Chinese, common in
+# fansub releases as ``.sc.ass`` / ``.tc_v2.ass`` (``_v2`` = version).
 LANG_TAGS = {
     "zh", "chs", "cht", "cn", "tw", "hk",
     "en", "eng", "jp", "jpn", "ja", "kor", "ko",
+    "sc", "tc",
     "other", "default", "forced",
 }
+
+
+def _is_lang_tag(tail: str) -> bool:
+    """Is ``tail`` (the part after the last ``.``) a language tag?
+
+    Accepts a bare tag (``zh``, ``sc``, ``tc``) and a tag with a
+    version / variant suffix (``sc_v2``, ``tc_v2``, ``chs_v2``,
+    ``zh-Hans``).  The first ``_``/``-`` segment must be a known
+    language code, so ``v2`` / ``2024`` / ``x265`` are never tags.
+    """
+    first = re.split(r"[_-]", tail.lower(), maxsplit=1)[0]
+    return first in LANG_TAGS
 
 # Tokens that are never an episode number.  Matched as whole tokens
 # (separated by space / ``-`` / ``_`` / ``.``) after bracket groups are gone.
@@ -79,10 +94,11 @@ def strip_lang_suffix(filename: str) -> str:
     # Remove the real extension first.
     if "." in stem:
         stem = stem.rsplit(".", 1)[0]
-    # Then a language tag, if present (``.zh`` / ``.en`` / ``.chs`` ...).
+    # Then a language tag, if present (``.zh`` / ``.en`` / ``.chs`` /
+    # ``.sc_v2`` / ``.tc_v2`` ...).
     if "." in stem:
         head, tail = stem.rsplit(".", 1)
-        if tail.lower() in LANG_TAGS:
+        if _is_lang_tag(tail):
             return head
     return stem
 
@@ -93,11 +109,12 @@ def base_name(filename: str) -> str:
 
 
 def lang_suffix(filename: str) -> str:
-    """``.zh`` for ``Title.zh.srt``, else ``""`` (kept on rename)."""
+    """``.zh`` for ``Title.zh.srt``, ``.sc_v2`` for ``Title.sc_v2.ass``,
+    else ``""`` (kept on rename — sc/tc must stay distinct)."""
     stem = filename.rsplit(".", 1)[0] if "." in filename else filename
     if "." in stem:
         head, tail = stem.rsplit(".", 1)
-        if tail.lower() in LANG_TAGS:
+        if _is_lang_tag(tail):
             return "." + tail
     return ""
 

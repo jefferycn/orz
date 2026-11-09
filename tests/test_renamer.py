@@ -229,6 +229,43 @@ class TestFansubBatches(unittest.TestCase):
             f"Mobile Suit Gundam Unicorn - S01E{n:02d} - {titles[n]}.cht.ass"
             for n in range(1, 8)])
 
+    def test_giji_harem_out_of_order_and_end(self):
+        # 乱序给 01-12，"12 END" 里的 END 不影响集数。
+        titles = {i: f"第{i}集" for i in range(1, 13)}
+        files = {}
+        for n in [7, 1, 8, 2, 9, 3, 10, 4, 11, 5, 12, 6]:
+            end = " END" if n == 12 else ""
+            files[f"[Moozzi2] Giji Harem - {n:02d}{end} "
+                  f"(BD 1920x1080 x265-10Bit Flac).mkv"] = f"g{n}".encode()
+        r, _ = self._run_show("Giji Harem", "Giji Harem (2024)",
+                              {1: titles}, files)
+        self.assertEqual(r.pending, [])
+        self.assertEqual(sorted(n for _, n in r.renamed), [
+            f"Giji Harem - S01E{n:02d} - 第{n}集.mkv" for n in range(1, 13)])
+
+    def test_seishun_video_plus_sc_and_tc_subtitles(self):
+        # 每集 1 视频 + .sc_v2 + .tc_v2 两份字幕：三者同组改名，
+        # sc/tc 后缀保留，不能撞到同一个 .ass 目标。
+        titles = {i: f"Ep{i}" for i in range(1, 14)}
+        files = {}
+        for n in range(1, 10):
+            base = ("[DMG&VCB-Studio] Seishun Buta Yarou wa Bunny Girl "
+                    f"Senpai no Yume wo Minai [0{n}][Ma10p_1080p][x265_flac]")
+            files[f"{base}.mkv"] = f"v{n}".encode()
+            files[f"{base}.sc_v2.ass"] = f"sc{n}".encode()
+            files[f"{base}.tc_v2.ass"] = f"tc{n}".encode()
+        r, _ = self._run_show("青春猪头少年不会梦到兔女郎学姐",
+                              "青春猪头少年不会梦到兔女郎学姐 (2018)",
+                              {1: titles}, files)
+        self.assertEqual(r.pending, [])
+        self.assertEqual(len(r.renamed), 27)
+        self.assertIn(
+            "青春猪头少年不会梦到兔女郎学姐 - S01E01 - Ep1.sc_v2.ass",
+            [n for _, n in r.renamed])
+        self.assertIn(
+            "青春猪头少年不会梦到兔女郎学姐 - S01E01 - Ep1.tc_v2.ass",
+            [n for _, n in r.renamed])
+
 
 if __name__ == "__main__":
     unittest.main()
