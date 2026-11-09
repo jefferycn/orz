@@ -125,3 +125,19 @@ def available() -> bool:
         return False
     ino.close()
     return True
+
+
+def max_queued_events() -> int | None:
+    """Current ``fs.inotify.max_queued_events`` (None when unreadable).
+
+    The kernel default is 16384 events per inotify instance (orz
+    has exactly one).  It is a host-wide kernel setting, not
+    something a container can change — the host sets it with
+    ``echo N > /proc/sys/fs/inotify/max_queued_events`` as root.
+    """
+    try:
+        with open("/proc/sys/fs/inotify/max_queued_events",
+                  encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None

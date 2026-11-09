@@ -10,7 +10,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.cache import save_episodes
-from app.inotify import IN_CLOSE_WRITE, IN_CREATE, Inotify, available
+from app.inotify import (IN_CLOSE_WRITE, IN_CREATE, Inotify, available,
+                         max_queued_events)
 from app.watcher import EventWatcher
 
 
@@ -47,6 +48,16 @@ class TestInotifyWrapper(unittest.TestCase):
             ino.close()
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_max_queued_events_is_positive(self):
+        # The kernel default is 16384; a season of 200 files is
+        # ~400-1000 events (one MOVED_TO per moved file, a few
+        # CREATE/MODIFY/CLOSE_WRITE per copied one), so overflow
+        # is far out of reach.  Read-only here: the value is a
+        # host kernel setting, not something orz sets.
+        queued = max_queued_events()
+        self.assertIsNotNone(queued)
+        self.assertGreater(queued, 0)
 
 
 def _make_show(root, show="Show (2024)", titles=None):

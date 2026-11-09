@@ -62,7 +62,7 @@ from .cache import load_episodes, save_episodes
 from .inotify import (
     IN_CLOSE_WRITE, IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_IGNORED,
     IN_ISDIR, IN_MODIFY, IN_MOVED_FROM, IN_MOVED_TO, IN_MOVE_SELF,
-    IN_Q_OVERFLOW, Inotify,
+    IN_Q_OVERFLOW, Inotify, max_queued_events,
 )
 from .mapper import EpisodeMapper, load_override
 from .nfo import (generate_nfo, generate_season_folders, nfo_path,
@@ -689,8 +689,11 @@ class EventWatcher:
 
     # -- main loop ------------------------------------------------------
     def start(self) -> None:
-        log.info("Watching %s (inotify, files stable after %ss)",
-                 ", ".join(self.roots), self.stable_seconds)
+        queued = max_queued_events()
+        log.info("Watching %s (inotify, files stable after %ss, "
+                 "event queue max %s)",
+                 ", ".join(self.roots), self.stable_seconds,
+                 queued if queued is not None else "unknown")
         # Watches only — no startup scan, by design: files already
         # on disk are not touched until an event marks their
         # folder dirty.  (Run `orz scan` once to catch up files
