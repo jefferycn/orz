@@ -311,8 +311,24 @@ def rename_season_folder(season_dir: str, show_title: str, show_dir: str,
             log.info("Batch parse %s -> episode %s (season %s)",
                      video, guess.episode, guess.season)
         if guess.episode is not None:
-            mapped = mapper.map(guess.season if guess.season is not None
-                                else season, guess.episode)
+            # Arc-title match (v2.8.0): a medium-confidence number
+            # with no season marker can be arc-relative —
+            # "[凡人修仙传 慕兰之战][24]" is 慕兰之战 #24 (TMDB
+            # S01E200), not #24 of the whole show.  When the
+            # filename's text + the number exactly equals one TMDB
+            # episode title, that title wins over the bare number.
+            # High-confidence markers (SxxEyy / Eyy / 第x集) and
+            # guesses with a season marker keep their own path.
+            mapped = None
+            if guess.confidence == "medium" and guess.season is None:
+                mapped = mapper.map_by_title(
+                    video, guess.episode, season, show_title)
+                if mapped is not None:
+                    log.info("Title match: %s -> S%02dE%02d (%s)",
+                             video, mapped[0], mapped[1], mapped[2])
+            if mapped is None:
+                mapped = mapper.map(guess.season if guess.season is not None
+                                    else season, guess.episode)
             if mapped is None:
                 result.pending.append({
                     "file": video,

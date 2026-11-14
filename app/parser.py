@@ -386,6 +386,51 @@ def batch_parse(filenames: list[str]) -> dict[str, EpisodeGuess]:
     return out
 
 
+def title_candidates(filename: str, show_title: str | None) -> list[str]:
+    """Text segments of a filename that could be an arc name.
+
+    Bracket groups (``[凡人修仙传 慕兰之战]`` -> ``慕兰之战``,
+    show title stripped; the unstripped group is kept too) plus
+    the cleaned remainder text (``凡人修仙传 慕兰之战 24`` ->
+    ``慕兰之战``).  Pure-digit groups (``[2026]``, ``[24]``) are
+    numbers, not arc text.  Used by the arc-title match
+    (``EpisodeMapper.map_by_title``): a candidate + the parsed
+    episode number is compared against TMDB episode titles, so
+    junk candidates are harmless — only an exact title match
+    counts.  A spaced candidate is also tried joined
+    (``慕兰 之战`` -> ``慕兰之战``), since titles have no space
+    between arc and number.
+    """
+    stem = strip_lang_suffix(filename)
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(text: str) -> None:
+        text = re.sub(r"[\s\-_\.]+", " ", text).strip()
+        if not text or len(text) < 2 or text.isdigit():
+            return
+        if text not in seen:
+            seen.add(text)
+            out.append(text)
+        joined = text.replace(" ", "")
+        if joined != text and joined not in seen:
+            seen.add(joined)
+            out.append(joined)
+
+    for m in re.finditer(r"\[([^\]]*)\]|\(([^)]*)\)", stem):
+        inner = (m.group(1) or m.group(2) or "").strip()
+        if not inner:
+            continue
+        _add(inner)
+        if show_title:
+            _add(inner.replace(show_title.strip(), " "))
+    # Non-bracket remainder: cleaned name minus the number tokens.
+    cleaned = _clean(stem, show_title)
+    cleaned = re.sub(r"\b\d+\b", " ", cleaned)
+    _add(cleaned)
+    return out
+
+
 def season_number_from_folder(folder_name: str) -> int | None:
     """``Season 01`` -> 1, ``Specials`` -> 0, else None.
 

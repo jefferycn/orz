@@ -39,6 +39,8 @@ import json
 import os
 from datetime import date
 
+from .parser import title_candidates
+
 # An air-date gap longer than this inside one TMDB season is a
 # season break, not a cour break: cours resume within ~3 months,
 # real seasons are typically 6+ months apart (青之箱 S1 finale
@@ -175,6 +177,42 @@ class EpisodeMapper:
         ep = last["eps"][-1] + (absolute - end)
         return (last["season"], ep,
                 self.seasons[last["season"]].get(ep, ""))
+
+    def map_by_title(self, filename: str, episode: int, season: int,
+                     show_title: str | None = None
+                     ) -> tuple[int, int, str] | None:
+        """Arc-title match: ``(season, episode, title)`` or None.
+
+        A bracket / bare episode number can be arc-relative: the
+        release ``[凡人修仙传 慕兰之战][24]`` is 慕兰之战 #24,
+        which is TMDB S01E200 (titled ``慕兰之战24``), not S01E24.
+        When a text segment of the filename + the parsed number
+        exactly equals one TMDB episode title of this season, that
+        episode wins over the bare number.  The arc name is never
+        hardcoded — it comes from the filename, and the titles
+        from the TMDB cache, so the rule is the same for every
+        show and only fires where the data supports it (Chinese
+        year-long donghua titles carry arc + number; descriptive
+        titles like ``我回来啦`` never match).  Exact full-title
+        match only, and it must be unique — zero or two matches
+        mean no match, and the caller falls back to the number
+        mapping.  Only the folder season's titles are searched.
+        """
+        titles = self.seasons.get(season)
+        if not titles:
+            return None
+        numbers = {str(episode), f"{episode:02d}"}
+        hits: set[tuple[int, str]] = set()
+        for text in title_candidates(filename, show_title):
+            for num in numbers:
+                want = text + num
+                for ep, title in titles.items():
+                    if title == want:
+                        hits.add((ep, title))
+        if len(hits) == 1:
+            ep, title = hits.pop()
+            return season, ep, title
+        return None
 
     def _episode_title(self, season: int, episode: int) -> str:
         return self.seasons.get(season, {}).get(episode, "")
